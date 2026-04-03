@@ -1,5 +1,6 @@
 -- =====================================================
--- 安全文件管理系统 - 数据库表结构
+-- 安全文件管理系统 - 数据库表结构 (完整初始化脚本)
+-- 包含基础表结构及所有后续新增字段合并
 -- =====================================================
 
 -- 创建数据库
@@ -36,13 +37,13 @@ CREATE TABLE t_user (
     role VARCHAR(20) NOT NULL DEFAULT 'user' COMMENT '用户角色：admin-管理员, user-普通用户',
     
     INDEX idx_username (username),
-    INDEX idx_created_at (created_at)
+    INDEX idx_created_at (created_at),
+    INDEX idx_role (role)  -- 合并自 migration_add_user_role.sql
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户表';
 
 -- =====================================================
 -- 2. 文件表
 -- =====================================================
-DROP TABLE IF EXISTS t_file;
 CREATE TABLE t_file (
     id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '文件ID',
     
@@ -71,13 +72,13 @@ CREATE TABLE t_file (
     last_download_time DATETIME COMMENT '最后下载时间',
     download_count INT NOT NULL DEFAULT 0 COMMENT '下载次数',
     description TEXT COMMENT '文件描述',
-    is_folder TINYINT NOT NULL DEFAULT 0 COMMENT '是否为文件夹：0-文件 1-文件夹（ZIP压缩包）',
-    deleted TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除：0-正常 1-已删除',
+    is_folder TINYINT NOT NULL DEFAULT 0 COMMENT '是否为文件夹：0-文件 1-文件夹（ZIP压缩包）',    -- 合并自 migration_add_is_folder.sql
+    deleted TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除：0-正常 1-已删除',                        -- 合并自 migration_add_deleted.sql
     
     -- 索引优化
     INDEX idx_user_id (user_id),
     INDEX idx_upload_time (upload_time),
-    INDEX idx_deleted (deleted),
+    INDEX idx_deleted (deleted),                   -- 合并自 migration_add_deleted.sql
     INDEX idx_user_upload (user_id, upload_time),
     
     -- 外键约束
@@ -85,7 +86,7 @@ CREATE TABLE t_file (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文件表';
 
 -- =====================================================
--- 3. 系统配置表（可选，用于存储系统级密钥）
+-- 3. 系统配置表
 -- =====================================================
 DROP TABLE IF EXISTS t_system_config;
 CREATE TABLE t_system_config (
@@ -95,6 +96,13 @@ CREATE TABLE t_system_config (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系统配置表';
+
+-- =====================================================
+-- 4. 初始化数据 (可选)
+-- =====================================================
+-- 预留：如果有默认的 admin 用户插入，可以在这里执行
+-- 这里保留原有 migration_add_user_role 中的逻辑，用于在后续插入后更新角色，或者提醒
+-- UPDATE t_user SET role = 'admin' WHERE username = 'admin';
 
 -- =====================================================
 -- 字段安全说明
