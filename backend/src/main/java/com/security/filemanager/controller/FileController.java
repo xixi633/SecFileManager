@@ -443,6 +443,20 @@ public class FileController {
         
         return Result.success(fileList);
     }
+
+    /**
+     * 获取预览配置
+     */
+    @GetMapping("/preview/config")
+    @ApiOperation("获取预览配置")
+    public Result<java.util.Map<String, Long>> getPreviewConfig() {
+        java.util.Map<String, Long> config = new java.util.HashMap<>();
+        config.put("maxPreviewSize", fileService.getLargeFileThreshold());
+        config.put("smallFileThreshold", fileService.getSmallPreviewThreshold());
+        config.put("partialPreviewSize", fileService.getPartialPreviewSize());
+        config.put("maxRangeResponseSize", fileService.getMaxRangeResponseSize());
+        return Result.success(config);
+    }
     
     /**
      * 文件预览
@@ -460,9 +474,6 @@ public class FileController {
      * - >512MB且≤2GB: 逐块解密流式输出，避免全量加载到内存
      * - >2GB: 不支持在线预览
      */
-    // 小文件阈值（512MB），小于等于此值的文件加载到内存并缓存
-    private static final long SMALL_FILE_THRESHOLD = 512L * 1024 * 1024;
-
     @GetMapping("/preview/{fileId}")
     @ApiOperation("文件预览")
     public void previewFile(
@@ -486,7 +497,7 @@ public class FileController {
         String rangeHeader = request.getHeader("Range");
 
         // ≤512MB: 缓存方式（加载到内存，LRU缓存加速），Range请求也从缓存切片
-        if (fileInfo.getFileSize() <= SMALL_FILE_THRESHOLD) {
+        if (fileInfo.getFileSize() <= fileService.getSmallPreviewThreshold()) {
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
                 handleCachedRangePreview(fileId, userId, fileInfo, rangeHeader, response);
             } else {
@@ -609,8 +620,6 @@ public class FileController {
      * 对>512MB文件的Range请求，限制单次最大返回5MB，避免一次性加载整个大文件到内存。
      * 浏览器会根据 Content-Range 自动发送后续Range请求获取更多数据。
      */
-    private static final long MAX_RANGE_RESPONSE = 5L * 1024 * 1024; // 5MB - 大文件单次Range最大返回量
-
     private void handleRangePreview(Long fileId, Long userId,
             com.security.filemanager.entity.FileInfo fileInfo,
             String rangeHeader, HttpServletResponse response) throws IOException {
@@ -658,8 +667,8 @@ public class FileController {
             }
 
             // 对大文件限制单次Range返回量，防止 Range: bytes=0- 导致加载整个文件到内存 OOM
-            if ((end - start + 1) > MAX_RANGE_RESPONSE) {
-                end = start + MAX_RANGE_RESPONSE - 1;
+            if ((end - start + 1) > fileService.getMaxRangeResponseSize()) {
+                end = start + fileService.getMaxRangeResponseSize() - 1;
                 if (end >= fileLength) {
                     end = fileLength - 1;
                 }

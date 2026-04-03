@@ -6,10 +6,23 @@ export function checkChunk(identifier, chunkNumber) {
   });
 }
 
-export function uploadChunk(formData, onUploadProgress) {
+export function fetchChunkSessionStatus(identifier) {
+  return api.get("/file/chunk/session/status", {
+    params: { identifier }
+  });
+}
+
+export function resetChunkSession(identifier) {
+  return api.post("/file/chunk/session/reset", null, {
+    params: { identifier }
+  });
+}
+
+export function uploadChunk(formData, onUploadProgress, signal) {
   return api.post("/file/chunk/upload", formData, {
     headers: { "Content-Type": "multipart/form-data" },
-    onUploadProgress
+    onUploadProgress,
+    signal
   });
 }
 
@@ -28,15 +41,16 @@ export function fetchFileList(page = 1, size = 10, filters = {}) {
   });
 }
 
-export function uploadFile(formData, description, onUploadProgress, isFolder) {
+export function uploadFile(formData, description, onUploadProgress, isFolder, signal) {
   const params = {};
   if (description) params.description = description;
   if (typeof isFolder !== "undefined") params.isFolder = isFolder;
   return api.post("/file/upload", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     params,
-    timeout: 600000, // 10分钟超时
-    onUploadProgress: onUploadProgress
+    timeout: 600000,
+    onUploadProgress: onUploadProgress,
+    signal
   });
 }
 
@@ -70,6 +84,10 @@ export function fetchFolderEntries(fileId) {
   return api.get(`/file/folder/${fileId}/entries`);
 }
 
+export function fetchPreviewConfig() {
+  return api.get('/file/preview/config');
+}
+
 export function previewFolderEntry(fileId, path) {
   return api.get(`/file/folder/preview/${fileId}`, {
     params: { path },
@@ -89,7 +107,6 @@ export function deleteFolderEntry(fileId, path) {
     params: { path }
   });
 }
-
 
 export function fetchRecycleList(page = 1, size = 10) {
   return api.get("/file/recycle/list", {

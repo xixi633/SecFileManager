@@ -2,6 +2,8 @@ package com.security.filemanager;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 安全文件管理系统 - 启动类
@@ -10,6 +12,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * @date 2026-01-23
  */
 @SpringBootApplication
+@EnableAsync
+@EnableScheduling
 public class SecureFileManagerApplication {
     
     public static void main(String[] args) {

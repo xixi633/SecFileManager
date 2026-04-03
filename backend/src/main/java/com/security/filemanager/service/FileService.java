@@ -77,6 +77,24 @@ public class FileService {
         private long previewLargeFileThreshold;
 
     /**
+     * 小文件阈值（小于等于该值完整加载预览）
+     */
+    @Value("${secure-file.preview.small-file-threshold:536870912}")
+    private long previewSmallFileThreshold;
+
+    /**
+     * 大文件文本部分预览大小（Range请求前N字节）
+     */
+    @Value("${secure-file.preview.partial-preview-size:1048576}")
+    private long partialPreviewSize;
+
+    /**
+     * 大文件单次Range最大返回量
+     */
+    @Value("${secure-file.preview.max-range-response-size:5242880}")
+    private long maxRangeResponseSize;
+
+    /**
      * 分块大小（字节）
      */
     @Value("${secure-file.preview.chunk-size:4194304}")
@@ -117,6 +135,39 @@ public class FileService {
                     boolean shouldRemove = size() > MAX_CHUNK_CACHE_ENTRIES;
                     if (shouldRemove && eldest.getValue() != null) {
                         currentChunkCacheSize -= eldest.getValue().data.length;
+                    }
+                    return shouldRemove;
+                }
+            };
+
+    // ========== 文件夹解密结果缓存（预览目录内文件加速） ==========
+    private static final int MAX_FOLDER_CACHE_ENTRIES = 3;
+    private static final long MAX_FOLDER_CACHE_SIZE_BYTES = 800L * 1024 * 1024;
+    private static final long FOLDER_CACHE_EXPIRY_MS = 5 * 60 * 1000;
+    private static long currentFolderCacheSize = 0;
+    private static final Object folderCacheLock = new Object();
+
+    private static class CachedFolderData {
+        final byte[] data;
+        final long timestamp;
+
+        CachedFolderData(byte[] data) {
+            this.data = data;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - timestamp > FOLDER_CACHE_EXPIRY_MS;
+        }
+    }
+
+    private static final LinkedHashMap<String, CachedFolderData> folderDataCache =
+            new LinkedHashMap<String, CachedFolderData>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, CachedFolderData> eldest) {
+                    boolean shouldRemove = size() > MAX_FOLDER_CACHE_ENTRIES || currentFolderCacheSize > MAX_FOLDER_CACHE_SIZE_BYTES;
+                    if (shouldRemove && eldest.getValue() != null) {
+                        currentFolderCacheSize -= eldest.getValue().data.length;
                     }
                     return shouldRemove;
                 }
@@ -169,6 +220,56 @@ public class FileService {
      * @param description 文件描述
      * @return 文件ID
      */
+    private void cleanExpiredFolderCache() {
+        synchronized (folderCacheLock) {
+            folderDataCache.entrySet().removeIf(entry -> {
+                if (entry.getValue().isExpired()) {
+                    currentFolderCacheSize -= entry.getValue().data.length;
+                    return true;
+                }
+                return false;
+            });
+        }
+    }
+
+    private void evictFolderCache(Long fileId, Long userId) {
+        String key = userId + "_folder_" + fileId;
+        synchronized (folderCacheLock) {
+            CachedFolderData removed = folderDataCache.remove(key);
+            if (removed != null) {
+                currentFolderCacheSize -= removed.data.length;
+            }
+        }
+    }
+
+    private byte[] getFolderDataCached(FileInfo fileInfo, Long userId, File storageFile) {
+        cleanExpiredFolderCache();
+        String key = userId + "_folder_" + fileInfo.getId();
+
+        CachedFolderData cached;
+        synchronized (folderCacheLock) {
+            cached = folderDataCache.get(key);
+        }
+
+        if (cached != null && !cached.isExpired()) {
+            return cached.data;
+        }
+
+        byte[] data = isChunkedFile(storageFile.toPath())
+                ? decryptChunkedAll(fileInfo, userId, storageFile)
+                : decryptNonChunked(fileInfo, userId, storageFile);
+
+        synchronized (folderCacheLock) {
+            CachedFolderData old = folderDataCache.get(key);
+            if (old != null) {
+                currentFolderCacheSize -= old.data.length;
+            }
+            folderDataCache.put(key, new CachedFolderData(data));
+            currentFolderCacheSize += data.length;
+        }
+        return data;
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public Long uploadFile(MultipartFile file, Long userId, String description, Integer isFolder) {
         String originalFilename = file.getOriginalFilename();
@@ -480,6 +581,7 @@ public class FileService {
 
         // 清除分块缓存
         evictChunkCache(fileId);
+        evictFolderCache(fileId, userId);
 
         // 逻辑删除（进入回收站）
         fileMapper.deleteById(fileId);
@@ -587,6 +689,7 @@ public class FileService {
 
         // 清除分块缓存
         evictChunkCache(fileId);
+        evictFolderCache(fileId, userId);
 
         fileMapper.deletePhysicalByIdAndUserId(fileId, userId);
         log.info("文件已彻底删除: fileId={}, userId={}", fileId, userId);
@@ -1281,6 +1384,18 @@ public class FileService {
         return previewLargeFileThreshold;
     }
 
+    public long getSmallPreviewThreshold() {
+        return previewSmallFileThreshold;
+    }
+
+    public long getPartialPreviewSize() {
+        return partialPreviewSize;
+    }
+
+    public long getMaxRangeResponseSize() {
+        return maxRangeResponseSize;
+    }
+
     /**
      * 流式输出解密后的文件内容到输出流（大文件优化）
      * 对分块加密文件逐块解密写出，每次内存中仅持有一个分块，避免全量加载到内存
@@ -1376,9 +1491,7 @@ public class FileService {
         }
 
         File storageFile = new File(fileInfo.getStoragePath());
-        byte[] folderData = isChunkedFile(storageFile.toPath())
-                ? decryptChunkedAll(fileInfo, userId, storageFile)
-                : decryptNonChunked(fileInfo, userId, storageFile);
+        byte[] folderData = getFolderDataCached(fileInfo, userId, storageFile);
 
         List<FileEntryResponse> entries = new ArrayList<>();
         try (ByteArrayInputStream bais = new ByteArrayInputStream(folderData);
@@ -1434,9 +1547,7 @@ public class FileService {
         }
 
         File storageFile = new File(fileInfo.getStoragePath());
-        byte[] folderData = isChunkedFile(storageFile.toPath())
-                ? decryptChunkedAll(fileInfo, userId, storageFile)
-                : decryptNonChunked(fileInfo, userId, storageFile);
+        byte[] folderData = getFolderDataCached(fileInfo, userId, storageFile);
 
         try (ByteArrayInputStream bais = new ByteArrayInputStream(folderData);
              ZipInputStream zis = new ZipInputStream(bais);
@@ -1483,9 +1594,7 @@ public class FileService {
         }
 
         File storageFile = new File(fileInfo.getStoragePath());
-        byte[] folderData = isChunkedFile(storageFile.toPath())
-                ? decryptChunkedAll(fileInfo, userId, storageFile)
-                : decryptNonChunked(fileInfo, userId, storageFile);
+        byte[] folderData = getFolderDataCached(fileInfo, userId, storageFile);
 
         boolean deleted = false;
         boolean deleteDirectory = entryPath.endsWith("/");
@@ -1529,6 +1638,7 @@ public class FileService {
         }
 
         saveUpdatedFileContent(fileInfo, userId, newZipBytes, "application/zip");
+        evictFolderCache(fileId, userId);
     }
 
     private void saveUpdatedFileContent(FileInfo fileInfo, Long userId, byte[] rawData, String contentType) {
@@ -1720,12 +1830,7 @@ public class FileService {
             }
             
             File storageFile = new File(fileInfo.getStoragePath());
-            byte[] folderData;
-            if (isChunkedFile(storageFile.toPath())) {
-                folderData = decryptChunkedAll(fileInfo, userId, storageFile);
-            } else {
-                folderData = decryptNonChunked(fileInfo, userId, storageFile);
-            }
+            byte[] folderData = getFolderDataCached(fileInfo, userId, storageFile);
             
             // 解析ZIP文件列表
             List<String> fileList = new java.util.ArrayList<>();

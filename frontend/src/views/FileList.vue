@@ -76,11 +76,24 @@
           <div class="progress-info">
             <span class="status-text">{{ uploadStatus }}</span>
             <span class="speed-text">{{ uploadSpeed }}</span>
+            <el-button
+              size="small"
+              type="danger"
+              text
+              :disabled="!uploadingFile"
+              @click="onResetUploadSession"
+            >重传</el-button>
+            <el-button
+              size="small"
+              type="warning"
+              text
+              :disabled="!uploadingFile"
+              @click="onCancelUpload"
+            >取消</el-button>
           </div>
           <el-progress 
-            :percentage="uploadProcessing ? 100 : uploadPercentage" 
-            :status="uploadProcessing ? 'success' : ''"
-            :indeterminate="uploadProcessing"
+            :percentage="uploadPercentage" 
+            :status="uploadProcessing ? 'warning' : (uploadPercentage === 100 ? 'success' : '')"
             :stroke-width="6"
             :show-text="false"
             class="custom-progress"
@@ -96,7 +109,9 @@
             <span class="speed-text"></span>
           </div>
           <el-progress
-            :percentage="browseProgress"
+            :percentage="browseIndeterminate ? 100 : browseProgress"
+            :indeterminate="browseIndeterminate"
+            :duration="1.4"
             :stroke-width="6"
             :show-text="false"
             class="custom-progress"
@@ -228,6 +243,8 @@ import {
   updateFileDescription,
   fetchFolderEntries,
   checkChunk,
+  fetchChunkSessionStatus,
+  resetChunkSession,
   uploadChunk,
   mergeChunks,
   previewFolderEntry,
@@ -257,7 +274,9 @@ const previewFile = ref(null);
 const browseLoading = ref(false);
 const browseProgress = ref(0);
 const browseStatus = ref('');
-let browseTimer = null;
+const browseIndeterminate = ref(false);
+const browseStartedAt = ref(0);
+const folderBrowseCache = new Map();
 const searchFileName = ref('');
 const searchDescription = ref('');
 const searchKeyword = ref('');
@@ -268,6 +287,11 @@ const multiSelectEnabled = ref(false);
 const selectedRows = ref([]);
 const selectedCount = computed(() => selectedRows.value.length);
 const hasSelection = computed(() => selectedRows.value.length > 0);
+const uploadAbortController = ref(null);
+const currentUploadingIdentifier = ref('');
+const pendingUploadName = ref('');
+const pendingUploadSize = ref(0);
+const pendingUploadIsFolder = ref(0);
 
 
 
@@ -439,7 +463,7 @@ const updateUploadProgress = (loaded, total) => {
     uploadStatus.value = `${formatBytes(loaded)} / ?`;
   } else {
     const percentCompleted = Math.round((loaded * 100) / total);
-    uploadPercentage.value = Math.min(99, percentCompleted);
+    uploadPercentage.value = Math.min(100, percentCompleted);
     uploadStatus.value = `${formatBytes(loaded)} / ${formatBytes(total)}`;
   }
 
@@ -462,31 +486,25 @@ const waitForFileVisible = async (fileId, timeoutMs = 120000) => {
   return false;
 };
 
-const startBrowseProgress = () => {
+const startBrowseProgress = (status = '正在加载文件夹内容...') => {
   browseLoading.value = true;
-  browseProgress.value = 1;
-  browseStatus.value = '正在解压文件夹内容...';
-  if (browseTimer) {
-    clearInterval(browseTimer);
-  }
-  browseTimer = setInterval(() => {
-    if (browseProgress.value < 90) {
-      browseProgress.value += 1;
-    }
-  }, 500);
+  browseIndeterminate.value = true;
+  browseProgress.value = 0;
+  browseStartedAt.value = Date.now();
+  browseStatus.value = status;
 };
 
-const stopBrowseProgress = () => {
-  if (browseTimer) {
-    clearInterval(browseTimer);
-    browseTimer = null;
-  }
+const stopBrowseProgress = (status = '') => {
+  const elapsed = Math.max(1, Date.now() - browseStartedAt.value);
+  const seconds = (elapsed / 1000).toFixed(2);
+  browseIndeterminate.value = false;
   browseProgress.value = 100;
+  browseStatus.value = status || `目录加载完成（${seconds}s）`;
   setTimeout(() => {
     browseLoading.value = false;
     browseProgress.value = 0;
     browseStatus.value = '';
-  }, 300);
+  }, 220);
 };
 
 const isInvalidFileName = (name) => {
@@ -516,14 +534,20 @@ const handleUpload = async (options) => {
   }
 
   const file = options.file;
-  const CHUNK_SIZE = 20 * 1024 * 1024; // 20MB 分片
+  const CHUNK_SIZE = 32 * 1024 * 1024; // 32MB 分片，减少请求次数
   const isLargeFile = file.size > CHUNK_SIZE;
+  const CONCURRENT_UPLOADS = 2; // 小并发提升带宽利用，后端可重排写入
+  const ENABLE_CHUNK_CHECK = false; // 关闭逐分片探测，减少额外请求
 
   uploadingFile.value = true;
   uploadPercentage.value = 0;
   uploadStartTime.value = Date.now();
+  uploadAbortController.value = new AbortController();
   uploadProcessing.value = false;
   uploadSpeed.value = '';
+  pendingUploadName.value = file.name;
+  pendingUploadSize.value = file.size;
+  pendingUploadIsFolder.value = 0;
   
   if (!isLargeFile) {
       // ===== 小文件直接上传 =====
@@ -534,7 +558,7 @@ const handleUpload = async (options) => {
       try {
         const res = await uploadFile(formData, description.value, (progressEvent) => {
           updateUploadProgress(progressEvent.loaded, progressEvent.total);
-        });
+        }, undefined, uploadAbortController.value?.signal);
         if (res?.data?.code !== 200) {
           throw new Error(res?.data?.message || '上传失败');
         }
@@ -545,10 +569,26 @@ const handleUpload = async (options) => {
   } else {
       // ===== 大文件分片上传 =====
       try {
-          uploadStatus.value = '正在计算文件指纹...';
-          const identifier = await computeMD5(file);
+          uploadStatus.value = '正在初始化上传...';
+          const identifier = createUploadIdentifier(file);
+          currentUploadingIdentifier.value = identifier;
           
           const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+          let startChunkNumber = 0;
+          try {
+            const statusRes = await fetchChunkSessionStatus(identifier);
+            const statusData = statusRes?.data?.data;
+            if (statusData && ['UPLOADING', 'FINALIZING'].includes(statusData.stage)) {
+              startChunkNumber = Number(statusData.nextChunkNumber || 0);
+              if (startChunkNumber > 0) {
+                uploadStatus.value = `检测到断点，准备从第 ${startChunkNumber + 1} 片继续上传...`;
+              }
+            }
+          } catch (_) {
+            // 会话不存在或已过期时从头上传
+            startChunkNumber = 0;
+          }
           
           // 维护每个分片的上传进度 { chunkNumber: loadedBytes }
           const chunkProgress = new Map();
@@ -561,26 +601,27 @@ const handleUpload = async (options) => {
               updateUploadProgress(totalLoaded, file.size);
           };
 
-          const limit = pLimit(3); // 并发数 3
+          const limit = pLimit(CONCURRENT_UPLOADS);
           const tasks = [];
           
-          uploadStatus.value = '正在上传分片...';
+          uploadStatus.value = `正在上传分片（并发 ${CONCURRENT_UPLOADS}）...`;
 
-          for (let chunkNumber = 0; chunkNumber < totalChunks; chunkNumber++) {
+          for (let chunkNumber = startChunkNumber; chunkNumber < totalChunks; chunkNumber++) {
               tasks.push(limit(async () => {
                   if (!uploadingFile.value) throw new Error("上传已取消");
 
-                  // check if chunk exists
-                  const res = await checkChunk(identifier, chunkNumber);
-                  if (res.data.data) {
-                      // existing chunk
-                      const start = chunkNumber * CHUNK_SIZE;
-                      const end = Math.min(start + CHUNK_SIZE, file.size);
-                      chunkProgress.set(chunkNumber, end - start);
-                      updateTotalProgress();
-                      return;
+                  // 默认不做分片探测，直接上传以减少 RTT；需要断点续传时再开启
+                  if (ENABLE_CHUNK_CHECK) {
+                      const res = await checkChunk(identifier, chunkNumber);
+                      if (res.data.data) {
+                          const start = chunkNumber * CHUNK_SIZE;
+                          const end = Math.min(start + CHUNK_SIZE, file.size);
+                          chunkProgress.set(chunkNumber, end - start);
+                          updateTotalProgress();
+                          return;
+                      }
                   }
-                  
+
                   const start = chunkNumber * CHUNK_SIZE;
                   const end = Math.min(start + CHUNK_SIZE, file.size);
                   const chunk = file.slice(start, end);
@@ -598,7 +639,7 @@ const handleUpload = async (options) => {
                   await uploadChunk(formData, (p) => {
                        chunkProgress.set(chunkNumber, p.loaded);
                        updateTotalProgress();
-                  });
+                  }, uploadAbortController.value?.signal);
                   
                   // Ensure full size is set when done
                   chunkProgress.set(chunkNumber, chunk.size);
@@ -608,16 +649,13 @@ const handleUpload = async (options) => {
           
           await Promise.all(tasks);
           
-          uploadStatus.value = '正在合并文件...';
+          uploadStatus.value = '正在提交完成...';
           uploadProcessing.value = true;
-          // 发送合并请求 (由于后端已改为同步处理，此请求会等待直到合并完成)
-          const res = await mergeChunks(identifier, file.name, totalChunks, file.size);
-          if (res.data.code === 200) {
-              // 合并完成即代表入库成功，不再是异步处理
-              await handleUploadSuccess(null, false); 
-          } else {
-               throw new Error(res.data.message);
+          const mergeRes = await mergeChunks(identifier, file.name, totalChunks, file.size);
+          if (mergeRes?.data?.code !== 200) {
+               throw new Error(mergeRes?.data?.message || '完成上传失败');
           }
+          await handleUploadSuccess(mergeRes?.data?.data || null, false);
       } catch (e) {
           handleUploadError(e);
       }
@@ -626,28 +664,105 @@ const handleUpload = async (options) => {
 
 const handleUploadSuccess = async (fileId, isAsync = false) => {
     uploadPercentage.value = 100;
-    uploadStatus.value = '处理完成';
+    uploadStatus.value = '上传完成';
     uploadProcessing.value = false;
     ElMessage.success("上传成功");
+
+    const canOptimisticInsert = !currentFolderId.value && pagination.value.page === 1
+      && !searchFileName.value && !searchDescription.value && !searchKeyword.value;
+
+    if (fileId && canOptimisticInsert) {
+      const optimistic = {
+        id: fileId,
+        originalFilename: pendingUploadName.value || '新文件',
+        fileSize: pendingUploadSize.value || 0,
+        fileType: '',
+        uploadTime: new Date().toISOString(),
+        description: description.value || '',
+        isFolder: pendingUploadIsFolder.value || 0,
+      };
+      files.value = [optimistic, ...files.value.filter(item => item.id !== fileId)].slice(0, pagination.value.size);
+      pagination.value.total += 1;
+      setTimeout(() => { loadFiles(); }, 800);
+    } else {
+      await loadFiles();
+    }
+
     description.value = "";
-    
-    // 立即刷新列表
-    await loadFiles();
-    
+
     // 重置状态
     setTimeout(() => {
          uploadingFile.value = false;
          uploadPercentage.value = 0;
          uploadStatus.value = '';
-    }, 1000);
+         uploadAbortController.value = null;
+         currentUploadingIdentifier.value = '';
+         pendingUploadName.value = '';
+         pendingUploadSize.value = 0;
+         pendingUploadIsFolder.value = 0;
+    }, 700);
 }
 
 const handleUploadError = (e) => {
-    ElMessage.error(e.message || '上传失败');
+    if (e?.name !== 'CanceledError' && e?.code !== 'ERR_CANCELED') {
+      ElMessage.error(e.message || '上传失败');
+    }
     uploadProcessing.value = false;
     uploadingFile.value = false;
     uploadPercentage.value = 0;
+    uploadAbortController.value = null;
+    currentUploadingIdentifier.value = '';
 }
+
+
+const onCancelUpload = async () => {
+  if (!uploadingFile.value) return;
+  try {
+    if (uploadAbortController.value) {
+      uploadAbortController.value.abort();
+    }
+    if (currentUploadingIdentifier.value) {
+      await resetChunkSession(currentUploadingIdentifier.value);
+    }
+    uploadingFile.value = false;
+    uploadProcessing.value = false;
+    uploadPercentage.value = 0;
+    uploadStatus.value = '';
+    uploadSpeed.value = '';
+    uploadAbortController.value = null;
+    currentUploadingIdentifier.value = '';
+    ElMessage.success('已取消上传');
+  } catch (e) {
+    // 由拦截器提示
+  }
+}
+
+const onResetUploadSession = async () => {
+  if (!uploadingFile.value) return;
+  try {
+    const fileInput = document.querySelector('.el-upload input[type=file]');
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      ElMessage.warning('未找到当前上传文件，请重新选择后上传');
+      return;
+    }
+    let identifier = currentUploadingIdentifier.value;
+    if (!identifier) {
+      const file = fileInput.files[0];
+      identifier = createUploadIdentifier(file);
+    }
+    await resetChunkSession(identifier);
+    uploadingFile.value = false;
+    uploadProcessing.value = false;
+    uploadPercentage.value = 0;
+    uploadStatus.value = '';
+    uploadSpeed.value = '';
+    ElMessage.success('上传会话已重置，请重新上传');
+  } catch (e) {
+    // 由拦截器提示
+  }
+}
+
+const createUploadIdentifier = (file) => `${file.name}__${file.size}__${file.lastModified}`;
 
 const computeMD5 = (file) => {
     return new Promise((resolve, reject) => {
@@ -718,7 +833,9 @@ const onRemove = async (row) => {
     });
     if (row.isFolderEntry) {
       await deleteFolderEntry(row.parentFolderId, row.entryPath);
+        folderBrowseCache.delete(String(row.parentFolderId));
       ElMessage.success("删除成功");
+      folderBrowseCache.delete(String(row.parentFolderId));
       const res = await fetchFolderEntries(row.parentFolderId);
       folderEntries.value = res?.data?.data || [];
       renderFolderEntries();
@@ -775,6 +892,7 @@ const onBulkRemove = async () => {
     for (const row of rows) {
       if (row.isFolderEntry) {
         await deleteFolderEntry(row.parentFolderId, row.entryPath);
+        folderBrowseCache.delete(String(row.parentFolderId));
       } else {
         await deleteFile(row.id);
       }
@@ -822,6 +940,22 @@ const selectFolder = () => {
   folderInput.value.click();
 };
 
+const prefetchSiblingFolders = async (currentFolderId) => {
+  const candidates = (files.value || [])
+    .filter(item => item?.isFolder === 1 && item?.id !== currentFolderId)
+    .slice(0, 2);
+  for (const item of candidates) {
+    const key = String(item.id);
+    if (folderBrowseCache.has(key)) continue;
+    try {
+      const res = await fetchFolderEntries(item.id);
+      folderBrowseCache.set(key, { ts: Date.now(), entries: res?.data?.data || [] });
+    } catch (_) {
+      // 预热失败不影响主流程
+    }
+  }
+};
+
 const onBrowseFolder = async (row) => {
   try {
     if (row.isFolderEntry && row.isDirectory) {
@@ -836,13 +970,31 @@ const onBrowseFolder = async (row) => {
     currentFolderPath.value = '';
     pagination.value.page = 1;
 
-    startBrowseProgress();
+    startBrowseProgress('正在读取目录信息...');
+
+    const cacheKey = String(row.id);
+    const cached = folderBrowseCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && now - cached.ts < 60_000) {
+      browseStatus.value = '命中缓存，正在渲染目录...';
+      folderEntries.value = cached.entries;
+      currentPath.value = buildBreadcrumbForPath(row.originalFilename, '');
+      renderFolderEntries();
+      stopBrowseProgress('目录加载完成（缓存）');
+      return;
+    }
+
+    browseStatus.value = '正在从服务器获取目录（真实进度不可得）...';
     const res = await fetchFolderEntries(row.id);
-    folderEntries.value = res?.data?.data || [];
+    const entries = res?.data?.data || [];
+
+    browseStatus.value = '正在渲染目录...';
+    folderEntries.value = entries;
+    folderBrowseCache.set(cacheKey, { ts: now, entries });
     currentPath.value = buildBreadcrumbForPath(row.originalFilename, '');
     renderFolderEntries();
     stopBrowseProgress();
-    
+    prefetchSiblingFolders(row.id);
   } catch (e) {
     stopBrowseProgress();
     ElMessage.error('浏览文件夹失败: ' + e.message);
@@ -856,6 +1008,7 @@ const handleFolderSelect = async (event) => {
   uploadingFile.value = true;
   uploadPercentage.value = 0;
   uploadStartTime.value = Date.now();
+  uploadAbortController.value = new AbortController();
 
   try {
     // 获取文件夹名称
@@ -869,6 +1022,8 @@ const handleFolderSelect = async (event) => {
     }
     
     uploadStatus.value = `正在打包 ${fileList.length} 个文件...`;
+    pendingUploadName.value = `${folderName}.zip`;
+    pendingUploadIsFolder.value = 1;
     
     // 创建ZIP压缩包
     const zip = new JSZip();
@@ -884,11 +1039,17 @@ const handleFolderSelect = async (event) => {
     const zipBlob = await zip.generateAsync({ 
       type: "blob",
       compression: "DEFLATE",
-      compressionOptions: { level: 6 }
+      compressionOptions: { level: 1 }
+    }, (metadata) => {
+      const packPercent = Math.round(metadata.percent || 0);
+      uploadPercentage.value = Math.min(30, Math.round(packPercent * 0.3));
+      uploadStatus.value = `正在压缩文件... ${packPercent}%`;
+      uploadSpeed.value = '';
     });
     
     // 创建ZIP文件对象
     const zipFile = new File([zipBlob], `${folderName}.zip`, { type: 'application/zip' });
+    pendingUploadSize.value = zipFile.size;
     if (zipFile.size === 0) {
       ElMessage.warning('不能上传空文件夹');
       uploadingFile.value = false;
@@ -908,35 +1069,34 @@ const handleFolderSelect = async (event) => {
       formData,
       description.value || `文件夹: ${folderName}`,
       (progressEvent) => {
-      updateUploadProgress(progressEvent.loaded, progressEvent.total);
+        const total = progressEvent.total || zipFile.size;
+        const loaded = progressEvent.loaded || 0;
+        const uploadPhasePercent = total > 0 ? Math.round((loaded * 70) / total) : 0;
+        uploadPercentage.value = Math.min(99, 30 + uploadPhasePercent);
+        uploadStatus.value = `上传压缩包: ${formatBytes(loaded)} / ${formatBytes(total)}`;
+
+        const timeElapsed = (Date.now() - uploadStartTime.value) / 1000;
+        if (timeElapsed > 0) {
+          const speed = loaded / timeElapsed;
+          uploadSpeed.value = `上传速度: ${formatBytes(speed)}/s`;
+        }
       },
-      1
+      1,
+      uploadAbortController.value?.signal
     );
     if (res?.data?.code !== 200) {
       throw new Error(res?.data?.message || '上传失败');
     }
     
     const fileId = res?.data?.data;
-    uploadPercentage.value = 0;
-    uploadStatus.value = '上传完成，服务器处理中...';
+    uploadPercentage.value = 100;
+    uploadStatus.value = '上传完成';
     uploadSpeed.value = '';
-    uploadProcessing.value = true;
+    uploadProcessing.value = false;
 
     pagination.value.page = 1;
-
-    const found = await waitForFileVisible(fileId);
-
-    uploadProcessing.value = false;
-    if (found) {
-      uploadPercentage.value = 100;
-      ElMessage.success(`文件夹上传成功: ${folderName}`);
-      await loadFiles();
-    } else {
-      uploadPercentage.value = 99;
-      ElMessage.warning(`文件夹上传成功: ${folderName}，入库较慢请稍后刷新`);
-      await loadFiles();
-    }
-    description.value = "";
+    await handleUploadSuccess(fileId, false);
+    ElMessage.success(`文件夹上传成功: ${folderName}`);
     event.target.value = ""; // 重置input
     
   } catch (e) {

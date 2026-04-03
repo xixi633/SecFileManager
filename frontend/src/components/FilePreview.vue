@@ -9,13 +9,24 @@
   >
     <div style="min-height: 600px;">
       <!-- 文件过大提示（>2GB） -->
-      <div v-if="file?.fileSize > MAX_PREVIEW_SIZE" style="padding: 100px 0; text-align: center;">
+      <div v-if="file?.fileSize > previewConfig.maxPreviewSize" style="padding: 100px 0; text-align: center;">
         <el-icon :size="100" color="#E6A23C"><Warning /></el-icon>
         <p style="color: #606266; margin-top: 30px; font-size: 18px;">文件过大（超过2GB），暂不支持在线预览</p>
         <p style="color: #909399; font-size: 14px;">请下载到本地查看</p>
         <el-button type="primary" @click="$emit('download', file)" style="margin-top: 20px;">
           下载文件
         </el-button>
+      </div>
+
+      <!-- 预览失败提示 -->
+      <div v-else-if="previewError" style="padding: 100px 0; text-align: center;">
+        <el-icon :size="80" color="#F56C6C"><Warning /></el-icon>
+        <p style="color: #606266; margin-top: 24px; font-size: 18px;">预览失败</p>
+        <p style="color: #909399; font-size: 14px; margin-top: 8px;">{{ previewError }}</p>
+        <div style="margin-top: 20px; display: flex; justify-content: center; gap: 12px;">
+          <el-button @click="loadPreview(file)">重试</el-button>
+          <el-button type="primary" @click="$emit('download', file)">下载文件</el-button>
+        </div>
       </div>
 
       <!-- 图片预览（所有大小，URL流式加载） -->
@@ -166,13 +177,14 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onUnmounted } from 'vue';
+import { ref, watch, nextTick, onUnmounted, onMounted } from 'vue';
 import { Document, Headset, Warning, Download } from '@element-plus/icons-vue';
 import { renderAsync } from 'docx-preview';
 import * as pdfjsLib from 'pdfjs-dist';
 import * as XLSX from 'xlsx';
 import * as monaco from 'monaco-editor';
 import api from '../api/index.js';
+import { fetchPreviewConfig } from '../api/file.js';
 
 // Worker setup safely
 try {
@@ -183,10 +195,16 @@ try {
   console.warn('PDF.js worker init failed:', e);
 }
 
-// ============ 文件大小阈值常量 ============
-const MAX_PREVIEW_SIZE = 2147483648;            // 2GB - 超过此大小不支持预览
-const SMALL_FILE_THRESHOLD = 512 * 1024 * 1024; // 512MB - 小于等于此大小完整加载到内存
-const PARTIAL_PREVIEW_SIZE = 1024 * 1024;        // 1MB - 大文件文本预览的最大读取量
+// ============ 文件大小阈值常量（后端配置） ============
+const DEFAULT_MAX_PREVIEW_SIZE = 2147483648; // 2GB
+const DEFAULT_SMALL_FILE_THRESHOLD = 512 * 1024 * 1024; // 512MB
+const DEFAULT_PARTIAL_PREVIEW_SIZE = 1024 * 1024; // 1MB
+
+const previewConfig = ref({
+  maxPreviewSize: DEFAULT_MAX_PREVIEW_SIZE,
+  smallFileThreshold: DEFAULT_SMALL_FILE_THRESHOLD,
+  partialPreviewSize: DEFAULT_PARTIAL_PREVIEW_SIZE
+});
 
 const props = defineProps({
   visible: Boolean,
@@ -203,6 +221,7 @@ const monacoContainer = ref(null);
 const pdfPages = ref(0);
 const pdfCanvasRefs = ref([]);
 const textContent = ref('');
+const previewError = ref('');
 let monacoEditor = null;
 let currentBlobUrl = null;
 
@@ -244,10 +263,24 @@ const isTextFile = (file) => /\.(txt|log|ini|conf)$/i.test(file?.originalFilenam
 /**
  * 判断是否为大文件（>512MB）
  */
-const isLargeFile = (file) => (file?.fileSize || 0) > SMALL_FILE_THRESHOLD;
+const isLargeFile = (file) => (file?.fileSize || 0) > previewConfig.value.smallFileThreshold;
 
-const onMediaLoadError = (e) => {
-  console.error("Media load error", e);
+const onMediaLoadError = () => {
+  previewError.value = '媒体文件加载失败，请检查网络后重试或下载查看。';
+};
+
+const loadPreviewConfig = async () => {
+  try {
+    const res = await fetchPreviewConfig();
+    const cfg = res?.data?.data || {};
+    previewConfig.value = {
+      maxPreviewSize: cfg.maxPreviewSize || DEFAULT_MAX_PREVIEW_SIZE,
+      smallFileThreshold: cfg.smallFileThreshold || DEFAULT_SMALL_FILE_THRESHOLD,
+      partialPreviewSize: cfg.partialPreviewSize || DEFAULT_PARTIAL_PREVIEW_SIZE
+    };
+  } catch (e) {
+    console.warn('Load preview config failed, fallback to defaults', e);
+  }
 };
 
 // Canvas refs for PDF
@@ -274,14 +307,16 @@ const cleanup = () => {
   pdfPages.value = 0;
   pdfCanvasRefs.value = [];
   textContent.value = '';
+  previewError.value = '';
 };
 
 watch(() => props.visible, async (val) => {
   if (val && props.file) {
-    if (props.file.fileSize > MAX_PREVIEW_SIZE) {
+    if (props.file.fileSize > previewConfig.value.maxPreviewSize) {
       return; 
     }
     await nextTick();
+    previewError.value = '';
     loadPreview(props.file);
   } else {
     cleanup();
@@ -348,7 +383,7 @@ const loadPreview = async (file) => {
       }
     }
   } catch (e) {
-    console.error("Preview failed", e);
+    previewError.value = e?.response?.data?.message || e?.message || '预览加载失败，请重试或下载查看。';
   }
 };
 
@@ -361,7 +396,7 @@ const loadPartialTextPreview = async (file) => {
     const url = getPreviewUrl(file);
     const res = await fetch(url, {
       headers: {
-        'Range': `bytes=0-${PARTIAL_PREVIEW_SIZE - 1}`
+        'Range': `bytes=0-${previewConfig.value.partialPreviewSize - 1}`
       }
     });
 
@@ -382,7 +417,7 @@ const loadPartialTextPreview = async (file) => {
       textContent.value = text;
     }
   } catch (e) {
-    console.error("Partial text preview failed", e);
+    previewError.value = e?.message || '文本预览加载失败，请尝试下载查看。';
     textContent.value = '预览加载失败，请尝试下载查看。';
   }
 };
@@ -463,6 +498,10 @@ const renderCode = (code, filename) => {
     }
   }
 };
+
+onMounted(() => {
+  loadPreviewConfig();
+});
 
 onUnmounted(() => {
   cleanup();

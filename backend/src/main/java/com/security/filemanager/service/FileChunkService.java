@@ -2,23 +2,30 @@ package com.security.filemanager.service;
 
 import com.security.filemanager.dto.ChunkUploadRequest;
 import com.security.filemanager.entity.FileInfo;
-import com.security.filemanager.entity.User;
+import com.security.filemanager.exception.BizException;
 import com.security.filemanager.mapper.FileMapper;
-import com.security.filemanager.mapper.UserMapper;
+import com.security.filemanager.util.AESUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.annotation.Resource;
 import java.io.*;
-import java.nio.file.*;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.net.URLConnection;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Base64;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
@@ -26,111 +33,329 @@ public class FileChunkService {
 
     @Value("${secure-file.storage-root}")
     private String storageRoot;
-    
-    @Resource
-    private FileService fileService;
+
+    @Value("${secure-file.upload.session-timeout-ms:900000}")
+    private long sessionTimeoutMs;
 
     @Resource
-    private UserMapper userMapper;
+    private UserService userService;
+    @Resource
+    private FileMapper fileMapper;
 
-    private String getChunkPath(String identifier) {
-        return storageRoot + File.separator + "temp" + File.separator + identifier;
+    private static final byte[] CHUNK_MAGIC = new byte[]{'S', 'F', 'M', '1'};
+    private static final byte CHUNK_VERSION = 1;
+    private static final byte FLAG_CHUNKED = 0x01;
+    private static final int CHUNK_IV_BASE_LEN = 8;
+    private static final int CHUNK_TAG_LEN = 16;
+    private static final int CHUNK_HEADER_SIZE = 4 + 1 + 1 + 4 + 8;
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
+    private static final Map<String, UploadSession> SESSIONS = new ConcurrentHashMap<>();
+    private static final Map<String, CompletedUploadResult> COMPLETED_UPLOADS = new ConcurrentHashMap<>();
+    private static final long COMPLETED_UPLOAD_TTL_MS = 5 * 60 * 1000L;
+
+    public enum UploadStage { INIT, UPLOADING, FINALIZING, DONE, FAILED, EXPIRED }
+
+    public static class UploadStatus {
+        private final String identifier;
+        private final UploadStage stage;
+        private final long uploadedBytes;
+        private final long totalBytes;
+        private final int nextChunkNumber;
+        private final int totalChunks;
+        private final long updatedAt;
+
+        public UploadStatus(String identifier, UploadStage stage, long uploadedBytes, long totalBytes, int nextChunkNumber, int totalChunks, long updatedAt) {
+            this.identifier = identifier;
+            this.stage = stage;
+            this.uploadedBytes = uploadedBytes;
+            this.totalBytes = totalBytes;
+            this.nextChunkNumber = nextChunkNumber;
+            this.totalChunks = totalChunks;
+            this.updatedAt = updatedAt;
+        }
+
+        public String getIdentifier() { return identifier; }
+        public UploadStage getStage() { return stage; }
+        public long getUploadedBytes() { return uploadedBytes; }
+        public long getTotalBytes() { return totalBytes; }
+        public int getNextChunkNumber() { return nextChunkNumber; }
+        public int getTotalChunks() { return totalChunks; }
+        public long getUpdatedAt() { return updatedAt; }
+        public int getProgress() { return totalBytes <= 0 ? 0 : (int) Math.min(100, uploadedBytes * 100 / totalBytes); }
     }
+
+    private static class PendingChunk {
+        final int chunkNumber;
+        final byte[] data;
+
+        PendingChunk(int chunkNumber, byte[] data) {
+            this.chunkNumber = chunkNumber;
+            this.data = data;
+        }
+    }
+
+    private static class CompletedUploadResult {
+        final Long userId;
+        final Long fileId;
+        final long timestamp;
+
+        CompletedUploadResult(Long userId, Long fileId) {
+            this.userId = userId;
+            this.fileId = fileId;
+            this.timestamp = System.currentTimeMillis();
+        }
+    }
+
+    private static class UploadSession {
+        final String identifier;
+        final Long userId;
+        final String filename;
+        final long totalSize;
+        final int totalChunks;
+        final File storageFile;
+        final String fileKey;
+        final String encryptedFileKey;
+        final byte[] baseIv;
+        final String baseIvHex;
+        final MessageDigest digest;
+        final ByteArrayOutputStream tagBuffer = new ByteArrayOutputStream();
+        final Map<Integer, PendingChunk> pendingChunks = new ConcurrentHashMap<>();
+        final BufferedOutputStream bos;
+        int nextChunkNumber = 0;
+        long processedSize = 0;
+        volatile UploadStage stage = UploadStage.INIT;
+        volatile long lastActiveAt = System.currentTimeMillis();
+
+        UploadSession(String identifier, Long userId, String filename, long totalSize, int totalChunks,
+                      File storageFile, String fileKey, String encryptedFileKey,
+                      byte[] baseIv, String baseIvHex, MessageDigest digest, BufferedOutputStream bos) {
+            this.identifier = identifier;
+            this.userId = userId;
+            this.filename = filename;
+            this.totalSize = totalSize;
+            this.totalChunks = totalChunks;
+            this.storageFile = storageFile;
+            this.fileKey = fileKey;
+            this.encryptedFileKey = encryptedFileKey;
+            this.baseIv = baseIv;
+            this.baseIvHex = baseIvHex;
+            this.digest = digest;
+            this.bos = bos;
+        }
+    }
+
+    private String generateStoragePath() {
+        String dateDir = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy/MM"));
+        String filename = UUID.randomUUID() + ".enc";
+        return Paths.get(storageRoot, dateDir, filename).toString().replace("\\", "/");
+    }
+
+    private String buildChunkIvHex(byte[] baseIv, int chunkIndex) {
+        ByteBuffer buffer = ByteBuffer.allocate(12).order(ByteOrder.BIG_ENDIAN);
+        buffer.put(baseIv); buffer.putInt(chunkIndex);
+        return AESUtil.bytesToHex(buffer.array());
+    }
+
+    private void writeChunkedHeader(BufferedOutputStream os, int chunkSize, byte[] baseIv) throws IOException {
+        ByteBuffer b = ByteBuffer.allocate(CHUNK_HEADER_SIZE).order(ByteOrder.BIG_ENDIAN);
+        b.put(CHUNK_MAGIC).put(CHUNK_VERSION).put(FLAG_CHUNKED).putInt(chunkSize).put(baseIv);
+        os.write(b.array());
+    }
+
+    private UploadSession createSession(ChunkUploadRequest r) {
+        try {
+            File storageFile = new File(generateStoragePath());
+            if (storageFile.getParentFile() != null) storageFile.getParentFile().mkdirs();
+
+            String fileKey = AESUtil.generateKey();
+            String userMasterKey = userService.getUserMasterKey(r.getUserId());
+            String fileKeyIv = AESUtil.generateIV();
+            AESUtil.EncryptResult kr = AESUtil.encrypt(fileKey.getBytes(java.nio.charset.StandardCharsets.UTF_8), userMasterKey, fileKeyIv);
+            String encryptedFileKey = Base64.getEncoder().encodeToString(kr.getCiphertext()) + ":" + kr.getAuthTag() + ":" + fileKeyIv;
+
+            byte[] baseIv = new byte[CHUNK_IV_BASE_LEN];
+            SECURE_RANDOM.nextBytes(baseIv);
+            String baseIvHex = AESUtil.bytesToHex(baseIv);
+
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(storageFile));
+            int chunkSize = r.getChunkSize() == null ? 20 * 1024 * 1024 : r.getChunkSize().intValue();
+            writeChunkedHeader(bos, chunkSize, baseIv);
+
+            UploadSession s = new UploadSession(r.getIdentifier(), r.getUserId(), r.getFilename(), r.getTotalSize(), r.getTotalChunks(),
+                    storageFile, fileKey, encryptedFileKey, baseIv, baseIvHex, digest, bos);
+            s.stage = UploadStage.UPLOADING;
+            return s;
+        } catch (Exception e) {
+            throw BizException.internal("UPLOAD_INIT_FAILED", "初始化上传会话失败");
+        }
+    }
+
+    private boolean isExpired(UploadSession s) { return System.currentTimeMillis() - s.lastActiveAt > sessionTimeoutMs; }
+    private void touch(UploadSession s) { s.lastActiveAt = System.currentTimeMillis(); }
 
     public boolean checkChunk(String identifier, Integer chunkNumber) {
-        String path = getChunkPath(identifier) + File.separator + chunkNumber;
-        return new File(path).exists();
+        UploadSession s = SESSIONS.get(identifier);
+        return s != null && chunkNumber != null && !isExpired(s) && chunkNumber < s.nextChunkNumber;
     }
 
-    public void saveChunk(MultipartFile file, ChunkUploadRequest request) {
-        String path = getChunkPath(request.getIdentifier());
-        File dir = new File(path);
-        if (!dir.exists()) {
-            dir.mkdirs();
-        }
-        try {
-            File chunkFile = new File(path + File.separator + request.getChunkNumber());
-            file.transferTo(chunkFile);
-        } catch (IOException e) {
-            log.error("分片保存失败", e);
-            throw new RuntimeException("分片保存失败");
+    public UploadStatus getUploadStatus(String identifier, Long userId) {
+        UploadSession s = SESSIONS.get(identifier);
+        if (s == null) return new UploadStatus(identifier, UploadStage.DONE, 0, 0, 0, 0, System.currentTimeMillis());
+        synchronized (s) {
+            if (!s.userId.equals(userId)) throw BizException.conflict("UPLOAD_SESSION_USER_MISMATCH", "上传会话用户不匹配");
+            if (isExpired(s)) {
+                expireSession(identifier, s);
+                throw BizException.conflict("UPLOAD_SESSION_EXPIRED", "上传会话已过期，请重新上传");
+            }
+            return new UploadStatus(s.identifier, s.stage, s.processedSize, s.totalSize, s.nextChunkNumber, s.totalChunks, s.lastActiveAt);
         }
     }
 
-    //@Async("taskExecutor") // 移除异步注解，改为同步调用以便前端等待
-    public void mergeChunks(ChunkUploadRequest request) {
-        String chunkDir = getChunkPath(request.getIdentifier());
-        // String mergedFilePath = chunkDir + File.separator + request.getFilename(); // 不需要临时合并文件了
-        
-        try {
-            // 1. 确认所有分片都已上传
-            File dir = new File(chunkDir);
-            File[] chunks = dir.listFiles(f -> f.getName().matches("\\d+"));
-            if (chunks == null || chunks.length == 0) {
-                 log.error("没有找到分片文件: {}", request.getIdentifier());
-                 throw new RuntimeException("合并失败：分片不存在");
-            }
-            
-            // 简单校验数量（更严谨可以校验所有序号）
-            if (chunks.length != request.getTotalChunks()) {
-                log.warn("分片数量不一致，期望: {}, 实际: {}", request.getTotalChunks(), chunks.length);
-                 // 此时前端可能重试，这里可以不做强制失败，或者抛异常
-            }
+    public void saveChunk(MultipartFile file, ChunkUploadRequest r) {
+        if (r.getUserId() == null) throw BizException.badRequest("UPLOAD_USER_MISSING", "用户信息缺失");
+        if (r.getChunkNumber() == null) throw BizException.badRequest("UPLOAD_CHUNK_NUMBER_MISSING", "分片序号缺失");
 
-            // 2. 准备流式合并（直接通过 SequenceInputStream 读取所有分片流，传给 fileService）
-            List<File> sortedChunks = Arrays.stream(chunks)
-                    .sorted(Comparator.comparingInt(o -> Integer.parseInt(o.getName())))
-                    .collect(Collectors.toList());
-
-            // 注意：一次性打开所有分片的文件流可能会占用较多文件句柄
-            // 默认系统限制通常是 1024+，对于 20MB 分片，2GB 文件约 100 个句柄，是安全的
-            // 我们的前端已调整为 20MB 分片，所以这里安全
-            java.util.Vector<InputStream> inputStreams = new java.util.Vector<>();
+        UploadSession s = SESSIONS.computeIfAbsent(r.getIdentifier(), k -> createSession(r));
+        synchronized (s) {
             try {
-                for (File chunk : sortedChunks) {
-                    inputStreams.add(new FileInputStream(chunk));
+                if (!s.userId.equals(r.getUserId())) throw BizException.conflict("UPLOAD_SESSION_USER_MISMATCH", "上传会话用户不匹配");
+                if (isExpired(s)) { expireSession(r.getIdentifier(), s); throw BizException.conflict("UPLOAD_SESSION_EXPIRED", "上传会话已过期，请重新上传"); }
+                if (r.getChunkNumber() < 0 || r.getChunkNumber() >= s.totalChunks) {
+                    throw BizException.badRequest("UPLOAD_CHUNK_NUMBER_INVALID", "分片序号非法");
                 }
-            } catch (IOException e) {
-                // 创建流失败时，关闭已打开的流，避免资源泄漏
-                for (InputStream is : inputStreams) {
-                    try { is.close(); } catch (Exception ignored) {}
-                }
-                throw new RuntimeException("打开分片文件失败: " + e.getMessage(), e);
-            }
-            
-            try (SequenceInputStream sequenceInputStream = new SequenceInputStream(inputStreams.elements())) {
-                
-                Long userId = request.getUserId();
-                String contentType = "application/octet-stream"; // 默认流类型，也可从 filename 推断
-                
-                // 3. 调用流式上传接口（一边读取分片流，一边加密写入目标文件）
-                fileService.uploadStream(
-                    sequenceInputStream, 
-                    request.getFilename(), 
-                    request.getTotalSize(), 
-                    contentType, 
-                    userId, 
-                    request.getFilename(), // description 默认用文件名
-                    0 // isFolder 默认为 0
-                );
-                
-                log.info("分片流式合并并上传成功: {}", request.getIdentifier());
-            } finally {
-                // SequenceInputStream.close() 会关闭所有流，但为确保万无一失，显式关闭
-                for (InputStream is : inputStreams) {
-                    try { is.close(); } catch (Exception ignored) {}
-                }
-            }
 
-            // 4. 删除分片和目录
-            for (File chunk : chunks) {
-                chunk.delete();
-            }
-            dir.delete();
+                touch(s);
+                s.stage = UploadStage.UPLOADING;
 
-        } catch (Exception e) {
-            log.error("文件合并处理失败", e);
-            throw new RuntimeException("文件合并失败: " + e.getMessage());
+                int chunkNumber = r.getChunkNumber();
+                if (chunkNumber < s.nextChunkNumber) {
+                    return;
+                }
+                if (s.pendingChunks.containsKey(chunkNumber)) {
+                    return;
+                }
+
+                byte[] chunk = file.getBytes();
+                s.pendingChunks.put(chunkNumber, new PendingChunk(chunkNumber, chunk));
+                flushPendingChunks(s);
+
+                if (s.nextChunkNumber == s.totalChunks) {
+                    s.stage = UploadStage.FINALIZING;
+                    Long fileId = finalizeSession(s);
+                    s.stage = UploadStage.DONE;
+                    SESSIONS.remove(s.identifier);
+                    COMPLETED_UPLOADS.put(s.identifier, new CompletedUploadResult(s.userId, fileId));
+                }
+            } catch (BizException e) {
+                throw e;
+            } catch (Exception e) {
+                failSession(s, e);
+                throw BizException.internal("UPLOAD_CHUNK_PROCESS_FAILED", "分片处理失败");
+            }
         }
+    }
+
+    private void flushPendingChunks(UploadSession s) throws Exception {
+        while (true) {
+            PendingChunk pending = s.pendingChunks.remove(s.nextChunkNumber);
+            if (pending == null) {
+                break;
+            }
+            s.digest.update(pending.data);
+            String iv = buildChunkIvHex(s.baseIv, pending.chunkNumber);
+            AESUtil.EncryptResult er = AESUtil.encrypt(pending.data, s.fileKey, iv);
+            s.bos.write(er.getCiphertext());
+            s.tagBuffer.write(AESUtil.hexToBytes(er.getAuthTag()));
+            s.processedSize += pending.data.length;
+            s.nextChunkNumber++;
+        }
+    }
+
+    private Long finalizeSession(UploadSession s) throws IOException {
+        s.bos.write(s.tagBuffer.toByteArray());
+        s.bos.flush();
+        s.bos.close();
+
+        String fileHash = AESUtil.bytesToHex(s.digest.digest());
+        long encryptedSize = CHUNK_HEADER_SIZE + s.totalSize + (long) s.totalChunks * CHUNK_TAG_LEN;
+
+        FileInfo fi = new FileInfo();
+        fi.setUserId(s.userId);
+        fi.setOriginalFilename(s.filename);
+        fi.setFileSize(s.totalSize);
+        String ct = URLConnection.guessContentTypeFromName(s.filename);
+        fi.setFileType(ct == null ? "application/octet-stream" : ct);
+        fi.setStoragePath(s.storageFile.getPath().replace("\\", "/"));
+        fi.setEncryptedSize(encryptedSize);
+        fi.setEncryptedFileKey(s.encryptedFileKey);
+        fi.setIv(s.baseIvHex);
+        fi.setAuthTag("CHUNKED");
+        fi.setFileHash(fileHash);
+        fi.setUploadTime(LocalDateTime.now());
+        fi.setDownloadCount(0);
+        fi.setDescription(s.filename);
+        fi.setIsFolder(0);
+        fileMapper.insert(fi);
+        log.info("分片增量加密上传完成: {}, fileId={}", s.identifier, fi.getId());
+        return fi.getId();
+    }
+
+    private void expireSession(String id, UploadSession s) {
+        s.stage = UploadStage.EXPIRED;
+        safeCloseAndDelete(s);
+        SESSIONS.remove(id);
+        log.info("上传会话过期并清理: {}", id);
+    }
+
+    private void failSession(UploadSession s, Exception e) {
+        s.stage = UploadStage.FAILED;
+        safeCloseAndDelete(s);
+        SESSIONS.remove(s.identifier);
+        log.error("分片会话失败: {}", s.identifier, e);
+    }
+
+    private void safeCloseAndDelete(UploadSession s) {
+        try { s.bos.close(); } catch (Exception ignored) {}
+        try { Files.deleteIfExists(s.storageFile.toPath()); } catch (Exception ignored) {}
+    }
+
+    @Scheduled(fixedDelayString = "${secure-file.upload.session-cleanup-interval-ms:60000}")
+    public void cleanupExpiredSessions() {
+        SESSIONS.forEach((id, s) -> {
+            synchronized (s) {
+                if (isExpired(s)) expireSession(id, s);
+            }
+        });
+        long now = System.currentTimeMillis();
+        COMPLETED_UPLOADS.entrySet().removeIf(e -> now - e.getValue().timestamp > COMPLETED_UPLOAD_TTL_MS);
+    }
+
+    public void resetUploadSession(String identifier, Long userId) {
+        UploadSession s = SESSIONS.get(identifier);
+        if (s == null) {
+            throw BizException.conflict("UPLOAD_SESSION_NOT_FOUND", "上传会话不存在或已完成");
+        }
+        synchronized (s) {
+            if (!s.userId.equals(userId)) {
+                throw BizException.conflict("UPLOAD_SESSION_USER_MISMATCH", "上传会话用户不匹配");
+            }
+            s.stage = UploadStage.FAILED;
+            safeCloseAndDelete(s);
+            SESSIONS.remove(identifier);
+        }
+    }
+
+    public Long mergeChunks(ChunkUploadRequest request) {
+        UploadSession s = SESSIONS.get(request.getIdentifier());
+        if (s != null && s.stage != UploadStage.DONE) {
+            throw BizException.conflict("UPLOAD_NOT_FINISHED", "分片尚未上传完成");
+        }
+        CompletedUploadResult result = COMPLETED_UPLOADS.get(request.getIdentifier());
+        if (result != null && result.userId.equals(request.getUserId())) {
+            return result.fileId;
+        }
+        return null;
     }
 }

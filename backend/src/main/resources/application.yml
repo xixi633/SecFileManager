@@ -98,11 +98,16 @@ secure-file:
   # 大文件上传阈值（超过该大小启用分块加密）
   upload:
     large-file-threshold: 52428800  # 50MB
+    session-timeout-ms: 900000      # 15分钟上传会话超时
+    session-cleanup-interval-ms: 60000 # 1分钟清理一次
 
   # 大文件预览配置
   preview:
-    large-file-threshold: 2147483648  # 2GB
-    chunk-size: 268435456  # 256MB
+    large-file-threshold: 2147483648  # 2GB（超过不支持在线预览）
+    small-file-threshold: 536870912   # 512MB（小文件完整加载）
+    partial-preview-size: 1048576     # 1MB（大文本部分预览）
+    max-range-response-size: 5242880  # 5MB（单次Range返回上限）
+    chunk-size: 268435456             # 256MB
 
   # 系统主密钥（用于加密用户主密钥）
   # 【安全警告】生产环境必须通过环境变量或外部配置文件注入，不能硬编码

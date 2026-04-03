@@ -20,9 +20,24 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response,
   (error) => {
+    if (error?.code === "ERR_CANCELED" || error?.name === "CanceledError") {
+      return Promise.reject(error);
+    }
     const status = error?.response?.status;
+    const errorCode = error?.response?.data?.errorCode;
+    const serverMessage = error?.response?.data?.message;
+    const errorCodeMessageMap = {
+      UPLOAD_SESSION_EXPIRED: "上传会话已过期，请重新上传",
+      UPLOAD_CHUNK_OUT_OF_ORDER: "分片顺序异常，请重试上传",
+      UPLOAD_NOT_FINISHED: "分片尚未上传完成，请稍后再试",
+      PREVIEW_DECRYPT_FAILED: "预览解密失败，请下载后查看",
+      FILE_HASH_MISMATCH: "文件完整性校验失败，请重新上传",
+    };
     const message =
-      error?.response?.data?.message || error?.message || "请求失败";
+      (errorCode && errorCodeMessageMap[errorCode]) ||
+      serverMessage ||
+      error?.message ||
+      "请求失败";
     if (status === 401) {
       ElMessage.error("登录已过期，请重新登录");
       localStorage.clear();
