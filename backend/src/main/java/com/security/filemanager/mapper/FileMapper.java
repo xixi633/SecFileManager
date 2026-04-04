@@ -40,7 +40,16 @@ public interface FileMapper extends BaseMapper<FileInfo> {
                                                  @Param("userId") Long userId,
                                                  @Param("fileName") String fileName,
                                                  @Param("description") String description,
-                                                 @Param("keyword") String keyword);
+                                                 @Param("keyword") String keyword,
+                                                 @Param("typeCategory") String typeCategory);
+
+    /**
+     * 管理员分页查询文件（支持用户/文件名/类型过滤）
+     */
+    Page<FileInfo> selectPageForAdmin(Page<FileInfo> page,
+                                      @Param("userId") Long userId,
+                                      @Param("fileName") String fileName,
+                                      @Param("typeCategory") String typeCategory);
     
     /**
      * 查询用户的指定文件
@@ -100,7 +109,15 @@ public interface FileMapper extends BaseMapper<FileInfo> {
      */
     Page<FileInfo> selectPageDeletedForAdmin(Page<FileInfo> page,
                                              @Param("userId") Long userId,
-                                             @Param("fileName") String fileName);
+                                             @Param("fileName") String fileName,
+                                             @Param("typeCategory") String typeCategory);
+
+    /**
+     * 分页查询用户回收站文件（支持类型过滤）
+     */
+    Page<FileInfo> selectPageDeletedByUserIdWithFilter(Page<FileInfo> page,
+                                                       @Param("userId") Long userId,
+                                                       @Param("typeCategory") String typeCategory);
 
     /**
      * 管理员查询回收站中的指定文件（忽略逻辑删除）

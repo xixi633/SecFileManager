@@ -527,13 +527,13 @@ public class FileService {
      * @return 文件列表（分页）
      */
         public com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfoResponse> listFiles(
-            Long userId, Integer page, Integer size, String fileName, String description, String keyword) {
+            Long userId, Integer page, Integer size, String fileName, String description, String keyword, String typeCategory) {
 
         com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfo> pageParam =
             new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(page, size);
 
         com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfo> fileInfoPage =
-            fileMapper.selectPageByUserIdWithFilters(pageParam, userId, fileName, description, keyword);
+            fileMapper.selectPageByUserIdWithFilters(pageParam, userId, fileName, description, keyword, typeCategory);
 
         // 转换为响应对象
         com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfoResponse> responsePage =
@@ -626,12 +626,12 @@ public class FileService {
      * 分页查询回收站文件
      */
     public com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfoResponse> listDeletedFiles(
-            Long userId, Integer page, Integer size) {
+            Long userId, Integer page, Integer size, String typeCategory) {
         com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfo> pageParam =
                 new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(page, size);
 
         com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfo> fileInfoPage =
-                fileMapper.selectPageDeletedByUserId(pageParam, userId);
+            fileMapper.selectPageDeletedByUserIdWithFilter(pageParam, userId, typeCategory);
 
         com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfoResponse> responsePage =
                 new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>();

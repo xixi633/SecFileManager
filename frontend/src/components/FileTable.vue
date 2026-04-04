@@ -43,6 +43,12 @@
         <span class="text-secondary">{{ formatDateTime(scope.row.uploadTime) }}</span>
       </template>
     </el-table-column>
+
+    <el-table-column v-if="showTypeColumn" label="类型" width="110" align="center">
+      <template #default="scope">
+        <el-tag size="small" effect="plain">{{ getFileTypeLabel(scope.row) }}</el-tag>
+      </template>
+    </el-table-column>
     
     <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip>
       <template #default="scope">
@@ -94,6 +100,7 @@
 
 <script setup>
 import { Folder, Document, Picture, VideoCamera, Headset, DataAnalysis, View, Download, Edit, Delete } from '@element-plus/icons-vue';
+import { getFileTypeCategory, getFileTypeLabel } from '../utils/fileType.js';
 
 const props = defineProps({
   files: {
@@ -103,6 +110,10 @@ const props = defineProps({
   enableSelection: {
     type: Boolean,
     default: false,
+  },
+  showTypeColumn: {
+    type: Boolean,
+    default: true,
   },
 });
 
@@ -120,24 +131,12 @@ const isDir = (row) => isFolderZip(row) || isVirtualDir(row);
  * 根据文件名获取对应图标组件
  */
 const getFileIcon = (row) => {
-  if (isDir(row)) return Folder;
-  
-  const filename = row.originalFilename || '';
-  const ext = filename.split('.').pop().toLowerCase();
-  
-  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
-    return Picture;
-  }
-  if (['mp4', 'avi', 'mov', 'wmv', 'mkv'].includes(ext)) {
-    return VideoCamera;
-  }
-  if (['mp3', 'wav', 'flac', 'aac', 'ogg'].includes(ext)) {
-    return Headset;
-  }
-  if (['xls', 'xlsx', 'csv'].includes(ext)) {
-    return DataAnalysis;
-  }
-  
+  const category = getFileTypeCategory(row);
+  if (category === 'folder') return Folder;
+  if (category === 'image') return Picture;
+  if (category === 'video') return VideoCamera;
+  if (category === 'audio') return Headset;
+  if (category === 'document') return DataAnalysis;
   return Document;
 };
 

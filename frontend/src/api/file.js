@@ -88,6 +88,16 @@ export function fetchPreviewConfig() {
   return api.get('/file/preview/config');
 }
 
+export function fetchViewerUrl(fileId) {
+  return api.get(`/file/viewer/url/${fileId}`);
+}
+
+export function fetchFolderViewerUrl(fileId, path) {
+  return api.get(`/file/folder/viewer/url/${fileId}`, {
+    params: { path }
+  });
+}
+
 export function previewFolderEntry(fileId, path) {
   return api.get(`/file/folder/preview/${fileId}`, {
     params: { path },
@@ -108,9 +118,9 @@ export function deleteFolderEntry(fileId, path) {
   });
 }
 
-export function fetchRecycleList(page = 1, size = 10) {
+export function fetchRecycleList(page = 1, size = 10, filters = {}) {
   return api.get("/file/recycle/list", {
-    params: { page, size }
+    params: { page, size, ...filters }
   });
 }
 

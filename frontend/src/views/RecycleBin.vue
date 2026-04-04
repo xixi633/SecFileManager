@@ -22,6 +22,20 @@
           </div>
         </div>
       </div>
+
+      <div class="type-nav-bar">
+        <button
+          v-for="item in typeCategoryOptions"
+          :key="item.value"
+          type="button"
+          class="type-nav-item"
+          :class="{ 'is-active': filterTypeCategory === item.value }"
+          @click="onTypeCategoryNavClick(item.value)"
+        >
+          {{ item.label }}
+        </button>
+      </div>
+
       <el-table
         :key="multiSelectEnabled ? 'multi' : 'single'"
         :data="files"
@@ -55,8 +69,16 @@
             <span class="info-text">{{ formatDateTime(scope.row.uploadTime) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" align="center">
+        <el-table-column v-if="filterTypeCategory === 'all'" label="类型" width="110" align="center">
           <template #default="scope">
+            <el-tag size="small" effect="plain">{{ getFileTypeLabel(scope.row) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="180" align="center">
+          <template #default="scope">
+             <el-tooltip content="预览" placement="top">
+               <el-button type="primary" size="small" circle :icon="View" @click="onPreviewFile(scope.row)" />
+             </el-tooltip>
              <el-tooltip content="还原" placement="top">
                 <el-button type="success" size="small" circle :icon="RefreshLeft" @click="onRestore(scope.row)" />
              </el-tooltip>
@@ -78,6 +100,12 @@
           @current-change="loadFiles"
         />
       </div>
+
+      <file-preview
+        v-model:visible="previewDialogVisible"
+        :file="previewFile"
+        @download="onDownloadFromPreview"
+      />
     </el-card>
   </div>
 </template>
@@ -85,26 +113,19 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Folder, Document, Picture, VideoCamera, Headset, DataAnalysis, Refresh, RefreshLeft, Delete } from '@element-plus/icons-vue';
+import { Folder, Document, Picture, VideoCamera, Headset, DataAnalysis, Refresh, RefreshLeft, Delete, View } from '@element-plus/icons-vue';
 import { fetchRecycleList, restoreFile, deleteFilePermanently } from '../api/file.js';
+import { TYPE_CATEGORY_OPTIONS, getFileTypeCategory, getFileTypeLabel } from '../utils/fileType.js';
+import FilePreview from '../components/FilePreview.vue';
 const isDir = (row) => row.isFolder === 1;
 
 const getFileIcon = (row) => {
-  if (isDir(row)) return Folder;
-  const filename = row.originalFilename || '';
-  const ext = filename.split('.').pop().toLowerCase();
-  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
-    return Picture;
-  }
-  if (['mp4', 'avi', 'mov', 'wmv', 'mkv'].includes(ext)) {
-    return VideoCamera;
-  }
-  if (['mp3', 'wav', 'flac', 'aac', 'ogg'].includes(ext)) {
-    return Headset;
-  }
-  if (['xls', 'xlsx', 'csv'].includes(ext)) {
-    return DataAnalysis;
-  }
+  const category = getFileTypeCategory(row);
+  if (category === 'folder') return Folder;
+  if (category === 'image') return Picture;
+  if (category === 'video') return VideoCamera;
+  if (category === 'audio') return Headset;
+  if (category === 'document') return DataAnalysis;
   return Document;
 };
 
@@ -113,13 +134,19 @@ const loading = ref(false);
 const pagination = ref({ page: 1, size: 10, total: 0 });
 const multiSelectEnabled = ref(false);
 const selectedRows = ref([]);
+const filterTypeCategory = ref('all');
+const previewDialogVisible = ref(false);
+const previewFile = ref(null);
+const typeCategoryOptions = TYPE_CATEGORY_OPTIONS;
 const hasSelection = computed(() => selectedRows.value.length > 0);
 const selectedCount = computed(() => selectedRows.value.length);
 
 const loadFiles = async () => {
   loading.value = true;
   try {
-    const res = await fetchRecycleList(pagination.value.page, pagination.value.size);
+    const res = await fetchRecycleList(pagination.value.page, pagination.value.size, {
+      typeCategory: filterTypeCategory.value === 'all' ? undefined : filterTypeCategory.value,
+    });
     const data = res.data.data;
     files.value = data.records || [];
     pagination.value.total = data.total || 0;
@@ -128,6 +155,17 @@ const loadFiles = async () => {
   } finally {
     loading.value = false;
   }
+};
+
+const onTypeCategoryChange = () => {
+  pagination.value.page = 1;
+  loadFiles();
+};
+
+const onTypeCategoryNavClick = (value) => {
+  if (filterTypeCategory.value === value) return;
+  filterTypeCategory.value = value;
+  onTypeCategoryChange();
 };
 
 const onRestore = async (file) => {
@@ -162,6 +200,15 @@ const onDeletePermanently = async (file) => {
       ElMessage.error('删除失败');
     }
   }
+};
+
+const onPreviewFile = (file) => {
+  previewFile.value = file;
+  previewDialogVisible.value = true;
+};
+
+const onDownloadFromPreview = () => {
+  ElMessage.info('回收站文件请先还原后再下载');
 };
 
 const onSelectionChange = (rows) => {
@@ -277,6 +324,39 @@ onMounted(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
+}
+
+.type-nav-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #f2f3f5;
+}
+
+.type-nav-item {
+  border: 1px solid #dcdfe6;
+  background: #fff;
+  color: #606266;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.type-nav-item:hover {
+  color: #409eff;
+  border-color: #a0cfff;
+  background: #ecf5ff;
+}
+
+.type-nav-item.is-active {
+  color: #fff;
+  border-color: #409eff;
+  background: #409eff;
+  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.25);
 }
 .table-header {
   position: sticky;

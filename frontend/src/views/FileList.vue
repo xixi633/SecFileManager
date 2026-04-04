@@ -149,10 +149,25 @@
           </div>
         </div>
       </div>
+
+      <div class="type-nav-bar">
+        <button
+          v-for="item in typeCategoryOptions"
+          :key="item.value"
+          type="button"
+          class="type-nav-item"
+          :class="{ 'is-active': searchTypeCategory === item.value }"
+          @click="onTypeCategoryNavClick(item.value)"
+        >
+          {{ item.label }}
+        </button>
+      </div>
+
       <file-table
         :key="multiSelectEnabled ? 'multi' : 'single'"
         :files="files"
         :enable-selection="multiSelectEnabled"
+        :show-type-column="searchTypeCategory === 'all'"
         @download="onDownload"
         @remove="onRemove"
         @browse="onBrowseFolder"
@@ -252,6 +267,7 @@ import {
   deleteFolderEntry,
 } from "../api/file.js";
 import pLimit from "p-limit"; // 需要安装 p-limit
+import { TYPE_CATEGORY_OPTIONS, getFileTypeCategory } from "../utils/fileType.js";
 
 
 const router = useRouter();
@@ -280,6 +296,7 @@ const folderBrowseCache = new Map();
 const searchFileName = ref('');
 const searchDescription = ref('');
 const searchKeyword = ref('');
+const searchTypeCategory = ref('all');
 const editDescVisible = ref(false);
 const editDescValue = ref('');
 const editingRow = ref(null);
@@ -292,6 +309,7 @@ const currentUploadingIdentifier = ref('');
 const pendingUploadName = ref('');
 const pendingUploadSize = ref(0);
 const pendingUploadIsFolder = ref(0);
+const typeCategoryOptions = TYPE_CATEGORY_OPTIONS;
 
 
 
@@ -393,19 +411,23 @@ const renderFolderEntries = () => {
     }
   });
 
-  pagination.value.total = items.length;
-  if (items.length === 0) {
+  const filteredItems = searchTypeCategory.value === 'all'
+    ? items
+    : items.filter((item) => getFileTypeCategory(item) === searchTypeCategory.value);
+
+  pagination.value.total = filteredItems.length;
+  if (filteredItems.length === 0) {
     pagination.value.page = 1;
     files.value = [];
     return;
   }
-  const totalPages = Math.ceil(items.length / pagination.value.size);
+  const totalPages = Math.ceil(filteredItems.length / pagination.value.size);
   if (pagination.value.page > totalPages) {
     pagination.value.page = totalPages;
   }
   const start = (pagination.value.page - 1) * pagination.value.size;
   const end = start + pagination.value.size;
-  files.value = items.slice(start, end);
+  files.value = filteredItems.slice(start, end);
 };
 
 const loadFiles = async () => {
@@ -420,7 +442,8 @@ const loadFiles = async () => {
       {
         fileName: searchFileName.value || undefined,
         description: searchDescription.value || undefined,
-        keyword: searchKeyword.value || undefined
+        keyword: searchKeyword.value || undefined,
+        typeCategory: searchTypeCategory.value === 'all' ? undefined : searchTypeCategory.value
       }
     );
     const data = res?.data?.data;
@@ -441,10 +464,18 @@ const onSearch = () => {
   loadFiles();
 };
 
+const onTypeCategoryNavClick = (value) => {
+  if (searchTypeCategory.value === value) return;
+  searchTypeCategory.value = value;
+  pagination.value.page = 1;
+  loadFiles();
+};
+
 const onResetSearch = () => {
   searchFileName.value = '';
   searchDescription.value = '';
   searchKeyword.value = '';
+  searchTypeCategory.value = 'all';
   pagination.value.page = 1;
   loadFiles();
 };
@@ -1215,6 +1246,39 @@ onMounted(loadFiles);
   border: none;
   box-shadow: 0 1px 4px rgba(0,0,0,0.05);
   flex: 1;
+}
+
+.type-nav-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #f2f3f5;
+}
+
+.type-nav-item {
+  border: 1px solid #dcdfe6;
+  background: #fff;
+  color: #606266;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.type-nav-item:hover {
+  color: #409eff;
+  border-color: #a0cfff;
+  background: #ecf5ff;
+}
+
+.type-nav-item.is-active {
+  color: #fff;
+  border-color: #409eff;
+  background: #409eff;
+  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.25);
 }
 
 .table-header {

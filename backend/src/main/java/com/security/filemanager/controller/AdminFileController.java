@@ -42,26 +42,11 @@ public class AdminFileController {
             @RequestParam(defaultValue = "1") Integer page,
             @RequestParam(defaultValue = "10") Integer size,
             @RequestParam(required = false) Long userId,
-            @RequestParam(required = false) String fileName) {
-        
-        Page<FileInfo> pageParam = new Page<>(page, size);
-        QueryWrapper<FileInfo> wrapper = new QueryWrapper<>();
+            @RequestParam(required = false) String fileName,
+            @RequestParam(required = false) String typeCategory) {
 
-        // 排除回收站文件
-        wrapper.eq("deleted", 0);
-        
-        // 按用户ID过滤
-        if (userId != null) {
-            wrapper.eq("user_id", userId);
-        }
-        
-        // 按文件名模糊查询
-        if (fileName != null && !fileName.trim().isEmpty()) {
-            wrapper.like("original_filename", fileName);
-        }
-        
-        wrapper.orderByDesc("upload_time");
-        Page<FileInfo> result = fileMapper.selectPage(pageParam, wrapper);
+        Page<FileInfo> pageParam = new Page<>(page, size);
+        Page<FileInfo> result = fileMapper.selectPageForAdmin(pageParam, userId, fileName, typeCategory);
         
         return Result.success(result);
     }
@@ -132,10 +117,11 @@ public class AdminFileController {
             @RequestParam(defaultValue = "1") Integer page,
             @RequestParam(defaultValue = "10") Integer size,
             @RequestParam(required = false) Long userId,
-            @RequestParam(required = false) String fileName) {
+            @RequestParam(required = false) String fileName,
+            @RequestParam(required = false) String typeCategory) {
 
         Page<FileInfo> pageParam = new Page<>(page, size);
-        Page<FileInfo> result = fileMapper.selectPageDeletedForAdmin(pageParam, userId, fileName);
+        Page<FileInfo> result = fileMapper.selectPageDeletedForAdmin(pageParam, userId, fileName, typeCategory);
 
         return Result.success(result);
     }

@@ -8,6 +8,7 @@ import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -38,6 +39,15 @@ public class FileController {
     
     @Resource
     private FileService fileService;
+
+    @Value("${secure-file.viewer.url-template:/viewer/onlinePreview?url={url}}")
+    private String viewerUrlTemplate;
+
+    @Value("${secure-file.jwt.header:Authorization}")
+    private String tokenHeader;
+
+    @Value("${secure-file.jwt.prefix:Bearer }")
+    private String tokenPrefix;
     
     // 文件预览缓存 - 避免重复解密（使用LRU缓存，最多缓存50个文件，总大小限制600MB）
     private static final long MAX_CACHE_SIZE_BYTES = 600L * 1024 * 1024; // 600MB
@@ -196,13 +206,14 @@ public class FileController {
             @ApiParam("每页大小") @RequestParam(value = "size", defaultValue = "10") Integer size,
             @ApiParam("文件名") @RequestParam(value = "fileName", required = false) String fileName,
             @ApiParam("文件描述") @RequestParam(value = "description", required = false) String description,
-            @ApiParam("关键词") @RequestParam(value = "keyword", required = false) String keyword) {
+            @ApiParam("关键词") @RequestParam(value = "keyword", required = false) String keyword,
+            @ApiParam("类型分类") @RequestParam(value = "typeCategory", required = false) String typeCategory) {
         // 获取当前用户ID
         Long userId = AuthInterceptor.getCurrentUserId();
         
         // 查询文件列表
         com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfoResponse> fileList = 
-                fileService.listFiles(userId, page, size, fileName, description, keyword);
+            fileService.listFiles(userId, page, size, fileName, description, keyword, typeCategory);
         
         return Result.success(fileList);
     }
@@ -244,10 +255,11 @@ public class FileController {
     @ApiOperation("回收站列表（分页）")
     public Result<com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfoResponse>> listRecycleFiles(
             @ApiParam("页码") @RequestParam(value = "page", defaultValue = "1") Integer page,
-            @ApiParam("每页大小") @RequestParam(value = "size", defaultValue = "10") Integer size) {
+            @ApiParam("每页大小") @RequestParam(value = "size", defaultValue = "10") Integer size,
+            @ApiParam("类型分类") @RequestParam(value = "typeCategory", required = false) String typeCategory) {
         Long userId = AuthInterceptor.getCurrentUserId();
         com.baomidou.mybatisplus.extension.plugins.pagination.Page<FileInfoResponse> fileList =
-                fileService.listDeletedFiles(userId, page, size);
+                fileService.listDeletedFiles(userId, page, size, typeCategory);
         return Result.success(fileList);
     }
 
@@ -456,6 +468,124 @@ public class FileController {
         config.put("partialPreviewSize", fileService.getPartialPreviewSize());
         config.put("maxRangeResponseSize", fileService.getMaxRangeResponseSize());
         return Result.success(config);
+    }
+
+    /**
+     * 获取系统内置查看器地址（普通文件）
+     */
+    @GetMapping("/viewer/url/{fileId}")
+    @ApiOperation("获取内置查看器URL")
+    public Result<String> getViewerUrl(
+            @ApiParam(value = "文件ID", required = true) @PathVariable Long fileId,
+            HttpServletRequest request) {
+        Long userId = AuthInterceptor.getCurrentUserId();
+        com.security.filemanager.entity.FileInfo fileInfo = fileService.getFileInfoForUser(fileId, userId);
+
+        String token = extractRawToken(request);
+        if (token == null || token.isEmpty()) {
+            return Result.error("获取查看器地址失败：未获取到有效Token");
+        }
+
+        String fileName = fileInfo.getOriginalFilename();
+        String previewSource = buildAbsoluteApiUrl(request,
+                "/file/preview/" + fileId + "?token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName));
+        String viewerUrl = buildViewerUrl(previewSource);
+        return Result.success(viewerUrl);
+    }
+
+    /**
+     * 获取系统内置查看器地址（文件夹内文件）
+     */
+    @GetMapping("/folder/viewer/url/{fileId}")
+    @ApiOperation("获取文件夹内文件内置查看器URL")
+    public Result<String> getFolderViewerUrl(
+            @ApiParam(value = "文件夹ID", required = true) @PathVariable Long fileId,
+            @ApiParam(value = "文件路径", required = true) @RequestParam("path") String path,
+            HttpServletRequest request) {
+        Long userId = AuthInterceptor.getCurrentUserId();
+        fileService.getFileInfoForUser(fileId, userId);
+
+        String token = extractRawToken(request);
+        if (token == null || token.isEmpty()) {
+            return Result.error("获取查看器地址失败：未获取到有效Token");
+        }
+
+        String decodedPath;
+        try {
+            decodedPath = java.net.URLDecoder.decode(path, StandardCharsets.UTF_8.name());
+        } catch (Exception e) {
+            decodedPath = path;
+        }
+
+        String fileName = decodedPath;
+        int lastSlash = decodedPath.lastIndexOf('/');
+        if (lastSlash >= 0) {
+            fileName = decodedPath.substring(lastSlash + 1);
+        }
+
+        String previewSource = buildAbsoluteApiUrl(request,
+                "/file/folder/preview/" + fileId + "?path=" + urlEncode(decodedPath) + "&token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName));
+        String viewerUrl = buildViewerUrl(previewSource);
+        return Result.success(viewerUrl);
+    }
+
+    private String buildViewerUrl(String sourceUrl) {
+        if (viewerUrlTemplate == null) {
+            return "";
+        }
+        
+        String viewerUrl = viewerUrlTemplate;
+        
+        if (viewerUrl.contains("{url}")) {
+            viewerUrl = viewerUrl.replace("{url}", urlEncode(sourceUrl));
+        }
+        
+        if (viewerUrl.contains("{base64Url}")) {
+            try {
+                String base64Url = java.util.Base64.getEncoder().encodeToString(sourceUrl.getBytes(StandardCharsets.UTF_8));
+                viewerUrl = viewerUrl.replace("{base64Url}", urlEncode(base64Url)); // 某些版本的kkfile需要再对base64串做urlEncode
+            } catch (Exception e) {
+                // Ignore
+            }
+        }
+        
+        return viewerUrl;
+    }
+
+    private String buildAbsoluteApiUrl(HttpServletRequest request, String apiPathWithQuery) {
+        String scheme = request.getScheme();
+        String host = request.getServerName();
+        int port = request.getServerPort();
+        String contextPath = request.getContextPath(); // /api
+
+        StringBuilder base = new StringBuilder();
+        base.append(scheme).append("://").append(host);
+        if (!(("http".equalsIgnoreCase(scheme) && port == 80)
+                || ("https".equalsIgnoreCase(scheme) && port == 443))) {
+            base.append(":").append(port);
+        }
+        if (contextPath != null && !contextPath.isEmpty()) {
+            base.append(contextPath);
+        }
+
+        if (apiPathWithQuery.startsWith("/")) {
+            base.append(apiPathWithQuery);
+        } else {
+            base.append('/').append(apiPathWithQuery);
+        }
+        return base.toString();
+    }
+
+    private String extractRawToken(HttpServletRequest request) {
+        String authHeader = request.getHeader(tokenHeader);
+        if (authHeader != null && authHeader.startsWith(tokenPrefix)) {
+            return authHeader.substring(tokenPrefix.length());
+        }
+        return request.getParameter("token");
+    }
+
+    private String urlEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
     }
     
     /**

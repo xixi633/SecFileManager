@@ -32,6 +32,20 @@
             />
           </el-select>
 
+          <el-select
+            v-model="filterTypeCategory"
+            placeholder="文件类型"
+            @change="onTypeCategoryChange"
+            class="filter-select"
+          >
+            <el-option
+              v-for="item in typeCategoryOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+
           <el-button type="primary" :icon="Search" circle @click="loadFiles" />
           <el-button :icon="Refresh" circle @click="onReset" />
         </div>
@@ -89,6 +103,11 @@
             <span class="info-text">{{ formatDateTime(scope.row.uploadTime) }}</span>
           </template>
         </el-table-column>
+        <el-table-column v-if="filterTypeCategory === 'all'" label="类型" width="110" align="center">
+          <template #default="scope">
+            <el-tag size="small" effect="plain">{{ getFileTypeLabel(scope.row) }}</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="140" align="center">
           <template #default="scope">
             <el-tooltip content="还原" placement="top">
@@ -121,6 +140,7 @@ import { ref, onMounted, computed } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Folder, Document, Picture, VideoCamera, Headset, DataAnalysis, Search, Refresh, RefreshLeft, Delete } from '@element-plus/icons-vue';
 import api from '../api/index.js';
+import { TYPE_CATEGORY_OPTIONS, getFileTypeCategory, getFileTypeLabel } from '../utils/fileType.js';
 
 const files = ref([]);
 const allUsers = ref([]);
@@ -130,6 +150,8 @@ const size = ref(10);
 const total = ref(0);
 const searchFileName = ref('');
 const filterUserId = ref(null);
+const filterTypeCategory = ref('all');
+const typeCategoryOptions = TYPE_CATEGORY_OPTIONS;
 const multiSelectEnabled = ref(false);
 const selectedRows = ref([]);
 const hasSelection = computed(() => selectedRows.value.length > 0);
@@ -138,21 +160,12 @@ const selectedCount = computed(() => selectedRows.value.length);
 const isDir = (row) => row.isFolder === 1;
 
 const getFileIcon = (row) => {
-  if (isDir(row)) return Folder;
-  const filename = row.originalFilename || '';
-  const ext = filename.split('.').pop().toLowerCase();
-  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
-    return Picture;
-  }
-  if (['mp4', 'avi', 'mov', 'wmv', 'mkv'].includes(ext)) {
-    return VideoCamera;
-  }
-  if (['mp3', 'wav', 'flac', 'aac', 'ogg'].includes(ext)) {
-    return Headset;
-  }
-  if (['xls', 'xlsx', 'csv'].includes(ext)) {
-    return DataAnalysis;
-  }
+  const category = getFileTypeCategory(row);
+  if (category === 'folder') return Folder;
+  if (category === 'image') return Picture;
+  if (category === 'video') return VideoCamera;
+  if (category === 'audio') return Headset;
+  if (category === 'document') return DataAnalysis;
   return Document;
 };
 
@@ -165,6 +178,9 @@ const loadFiles = async () => {
     }
     if (filterUserId.value) {
       params.userId = filterUserId.value;
+    }
+    if (filterTypeCategory.value !== 'all') {
+      params.typeCategory = filterTypeCategory.value;
     }
     const res = await api.get('/admin/file/recycle/list', { params });
     const data = res.data.data;
@@ -196,6 +212,12 @@ const getUserName = (userId) => {
 const onReset = () => {
   searchFileName.value = '';
   filterUserId.value = null;
+  filterTypeCategory.value = 'all';
+  page.value = 1;
+  loadFiles();
+};
+
+const onTypeCategoryChange = () => {
   page.value = 1;
   loadFiles();
 };
