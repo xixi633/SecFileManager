@@ -19,11 +19,16 @@ import org.springframework.web.multipart.MultipartFile;
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.net.URLEncoder;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
 
 /**
@@ -43,6 +48,9 @@ public class FileController {
     @Value("${secure-file.viewer.url-template:/viewer/onlinePreview?url={url}}")
     private String viewerUrlTemplate;
 
+    @Value("${secure-file.viewer.source-base-url:}")
+    private String viewerSourceBaseUrl;
+
     @Value("${secure-file.jwt.header:Authorization}")
     private String tokenHeader;
 
@@ -54,6 +62,16 @@ public class FileController {
     private static final int MAX_CACHE_ENTRIES = 50;
     private static long currentCacheSize = 0;
     private static final Object cacheLock = new Object();
+
+        // 文件夹条目磁盘缓存（用于大文件条目，避免每次 Range 请求都重复解压）
+        private static final long MAX_FOLDER_ENTRY_DISK_CACHE_SIZE_BYTES = 20L * 1024 * 1024 * 1024; // 20GB
+        private static final int MAX_FOLDER_ENTRY_DISK_CACHE_ENTRIES = 20;
+        private static final long FOLDER_ENTRY_DISK_CACHE_EXPIRE_MS = 15 * 60 * 1000; // 15分钟
+        private static final long FOLDER_ENTRY_MEMORY_CACHE_MAX_BYTES = 128L * 1024 * 1024; // 128MB
+        private static long currentFolderEntryDiskCacheSize = 0;
+        private static final Object folderEntryDiskCacheLock = new Object();
+        private static final Path FOLDER_ENTRY_CACHE_DIR = Paths.get(System.getProperty("java.io.tmpdir"),
+            "secfilemanager", "folder-entry-preview-cache");
     
     // 使用单一锁保护的LRU LinkedHashMap，不再包装synchronizedMap避免双重锁问题
     private static final java.util.LinkedHashMap<String, CachedFile> fileCache =
@@ -86,6 +104,38 @@ public class FileController {
             return System.currentTimeMillis() - timestamp > 5 * 60 * 1000;
         }
     }
+
+    private static class CachedDiskFile {
+        Path path;
+        String contentType;
+        long size;
+        long timestamp;
+
+        CachedDiskFile(Path path, String contentType, long size) {
+            this.path = path;
+            this.contentType = contentType;
+            this.size = size;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - timestamp > FOLDER_ENTRY_DISK_CACHE_EXPIRE_MS;
+        }
+    }
+
+    private static final java.util.LinkedHashMap<String, CachedDiskFile> folderEntryDiskCache =
+            new java.util.LinkedHashMap<String, CachedDiskFile>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, CachedDiskFile> eldest) {
+                    boolean shouldRemove = size() > MAX_FOLDER_ENTRY_DISK_CACHE_ENTRIES
+                            || currentFolderEntryDiskCacheSize > MAX_FOLDER_ENTRY_DISK_CACHE_SIZE_BYTES;
+                    if (shouldRemove && eldest.getValue() != null) {
+                        safeDelete(eldest.getValue().path);
+                        currentFolderEntryDiskCacheSize -= eldest.getValue().size;
+                    }
+                    return shouldRemove;
+                }
+            };
     
     /**
      * 清理过期缓存
@@ -99,6 +149,173 @@ public class FileController {
                 }
                 return false;
             });
+        }
+    }
+
+    private static void safeDelete(Path path) {
+        if (path == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException ignored) {
+            // best effort
+        }
+    }
+
+    private void cleanExpiredFolderEntryDiskCache() {
+        synchronized (folderEntryDiskCacheLock) {
+            folderEntryDiskCache.entrySet().removeIf(entry -> {
+                CachedDiskFile value = entry.getValue();
+                boolean missing = value == null || value.path == null || !Files.exists(value.path);
+                boolean expired = !missing && value.isExpired();
+                if (missing || expired) {
+                    if (value != null) {
+                        safeDelete(value.path);
+                        currentFolderEntryDiskCacheSize -= value.size;
+                    }
+                    return true;
+                }
+                return false;
+            });
+        }
+    }
+
+    private CachedDiskFile cacheFolderEntryToDisk(String cacheKey, byte[] data, String contentType) throws IOException {
+        Files.createDirectories(FOLDER_ENTRY_CACHE_DIR);
+        String safeName = Integer.toHexString(cacheKey.hashCode()) + "_" + System.nanoTime() + ".bin";
+        Path target = FOLDER_ENTRY_CACHE_DIR.resolve(safeName);
+        Files.write(target, data);
+
+        CachedDiskFile diskFile = new CachedDiskFile(target, contentType, data.length);
+        synchronized (folderEntryDiskCacheLock) {
+            CachedDiskFile old = folderEntryDiskCache.put(cacheKey, diskFile);
+            if (old != null) {
+                safeDelete(old.path);
+                currentFolderEntryDiskCacheSize -= old.size;
+            }
+            currentFolderEntryDiskCacheSize += diskFile.size;
+        }
+        return diskFile;
+    }
+
+    private void writeFolderEntryResponseFromMemory(CachedFile cachedFile, String rangeHeader, HttpServletResponse response) throws IOException {
+        byte[] data = cachedFile.data;
+        long totalLength = data.length;
+        String contentType = cachedFile.contentType != null ? cachedFile.contentType : "application/octet-stream";
+
+        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+            String range = rangeHeader.substring(6);
+            String[] parts = range.split("-");
+            long start = 0, end = totalLength - 1;
+            try {
+                if (parts.length > 0 && !parts[0].isEmpty()) start = Long.parseLong(parts[0]);
+                if (parts.length > 1 && !parts[1].isEmpty()) end = Long.parseLong(parts[1]);
+            } catch (NumberFormatException e) {
+                response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
+                response.setHeader("Content-Range", "bytes */" + totalLength);
+                return;
+            }
+
+            if (start > end || start < 0 || end >= totalLength) {
+                response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
+                response.setHeader("Content-Range", "bytes */" + totalLength);
+                return;
+            }
+
+            long contentLength = end - start + 1;
+            response.setContentType(contentType);
+            response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);
+            response.setHeader("Accept-Ranges", "bytes");
+            response.setHeader("Content-Range", "bytes " + start + "-" + end + "/" + totalLength);
+            response.setContentLengthLong(contentLength);
+            response.setHeader("Cache-Control", "no-cache");
+            response.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, Accept-Ranges");
+
+            try (OutputStream os = response.getOutputStream()) {
+                os.write(data, (int) start, (int) contentLength);
+                os.flush();
+            }
+            return;
+        }
+
+        response.setContentType(contentType);
+        response.setHeader("Accept-Ranges", "bytes");
+        response.setContentLengthLong(totalLength);
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, Accept-Ranges");
+
+        try (OutputStream os = response.getOutputStream()) {
+            os.write(data);
+            os.flush();
+        }
+    }
+
+    private void writeFolderEntryResponseFromDisk(CachedDiskFile diskFile, String rangeHeader, HttpServletResponse response) throws IOException {
+        long totalLength = diskFile.size;
+        String contentType = diskFile.contentType != null ? diskFile.contentType : "application/octet-stream";
+
+        if (!Files.exists(diskFile.path)) {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+
+        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+            String range = rangeHeader.substring(6);
+            String[] parts = range.split("-");
+            long start = 0, end = totalLength - 1;
+            try {
+                if (parts.length > 0 && !parts[0].isEmpty()) start = Long.parseLong(parts[0]);
+                if (parts.length > 1 && !parts[1].isEmpty()) end = Long.parseLong(parts[1]);
+            } catch (NumberFormatException e) {
+                response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
+                response.setHeader("Content-Range", "bytes */" + totalLength);
+                return;
+            }
+
+            if (start > end || start < 0 || end >= totalLength) {
+                response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
+                response.setHeader("Content-Range", "bytes */" + totalLength);
+                return;
+            }
+
+            long contentLength = end - start + 1;
+            response.setContentType(contentType);
+            response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);
+            response.setHeader("Accept-Ranges", "bytes");
+            response.setHeader("Content-Range", "bytes " + start + "-" + end + "/" + totalLength);
+            response.setContentLengthLong(contentLength);
+            response.setHeader("Cache-Control", "no-cache");
+            response.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, Accept-Ranges");
+
+            try (RandomAccessFile raf = new RandomAccessFile(diskFile.path.toFile(), "r");
+                 OutputStream os = response.getOutputStream()) {
+                raf.seek(start);
+                byte[] buffer = new byte[8192];
+                long remaining = contentLength;
+                while (remaining > 0) {
+                    int toRead = (int) Math.min(buffer.length, remaining);
+                    int read = raf.read(buffer, 0, toRead);
+                    if (read < 0) {
+                        break;
+                    }
+                    os.write(buffer, 0, read);
+                    remaining -= read;
+                }
+                os.flush();
+            }
+            return;
+        }
+
+        response.setContentType(contentType);
+        response.setHeader("Accept-Ranges", "bytes");
+        response.setContentLengthLong(totalLength);
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, Accept-Ranges");
+
+        try (OutputStream os = response.getOutputStream()) {
+            Files.copy(diskFile.path, os);
+            os.flush();
         }
     }
     
@@ -311,85 +528,92 @@ public class FileController {
             @RequestParam("path") String path,
             HttpServletRequest request,
             HttpServletResponse response) throws IOException {
+        String entryPath;
+        try {
+            entryPath = URLDecoder.decode(path, StandardCharsets.UTF_8.name());
+        } catch (Exception e) {
+            entryPath = path;
+        }
+        serveFolderEntryPreview(fileId, entryPath, request, response);
+    }
+
+    /**
+     * 文件夹内文件预览（安全路径版本，供 kkFileView 回源使用）
+     */
+    @GetMapping("/folder/preview-safe/{fileId}/{pathBase64}")
+    @ApiOperation("文件夹内文件预览（安全路径）")
+    public void previewFolderEntrySafe(
+            @ApiParam(value = "文件夹ID", required = true) @PathVariable Long fileId,
+            @ApiParam(value = "Base64URL编码后的文件路径", required = true) @PathVariable String pathBase64,
+            HttpServletRequest request,
+            HttpServletResponse response) throws IOException {
+        String entryPath;
+        try {
+            byte[] decoded = java.util.Base64.getUrlDecoder().decode(pathBase64);
+            entryPath = new String(decoded, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            response.setContentType("text/plain; charset=UTF-8");
+            response.getWriter().write("无效的路径参数");
+            return;
+        }
+        serveFolderEntryPreview(fileId, entryPath, request, response);
+    }
+
+    private void serveFolderEntryPreview(Long fileId, String entryPath,
+            HttpServletRequest request, HttpServletResponse response) throws IOException {
         Long userId = AuthInterceptor.getCurrentUserId();
-        String entryPath = URLDecoder.decode(path, StandardCharsets.UTF_8.name());
 
         // 从缓存获取或解密文件夹条目数据
         cleanExpiredCache();
+        cleanExpiredFolderEntryDiskCache();
         String cacheKey = userId + "_folder_" + fileId + "_" + entryPath;
         CachedFile cachedFile;
+        CachedDiskFile cachedDiskFile;
         synchronized (cacheLock) {
             cachedFile = fileCache.get(cacheKey);
         }
+        synchronized (folderEntryDiskCacheLock) {
+            cachedDiskFile = folderEntryDiskCache.get(cacheKey);
+        }
 
-        if (cachedFile == null || cachedFile.isExpired()) {
+        if ((cachedFile == null || cachedFile.isExpired())
+                && (cachedDiskFile == null || cachedDiskFile.isExpired() || !Files.exists(cachedDiskFile.path))) {
             log.info("文件夹条目缓存未命中，开始解密: fileId={}, path={}", fileId, entryPath);
             byte[] data = fileService.getFolderEntryDataWithLimit(fileId, userId, entryPath, fileService.getLargeFileThreshold());
             String contentType = java.net.URLConnection.guessContentTypeFromName(entryPath);
             if (contentType == null) contentType = MediaType.APPLICATION_OCTET_STREAM_VALUE;
-            cachedFile = new CachedFile(data, contentType);
-            synchronized (cacheLock) {
-                CachedFile oldCache = fileCache.get(cacheKey);
-                if (oldCache != null) {
-                    currentCacheSize -= oldCache.data.length;
-                }
-                fileCache.put(cacheKey, cachedFile);
-                currentCacheSize += cachedFile.data.length;
-            }
-            log.info("文件夹条目已缓存: fileId={}, path={}, size={} bytes", fileId, entryPath, data.length);
-        }
 
-        byte[] data = cachedFile.data;
-        long totalLength = data.length;
-        String contentType = cachedFile.contentType != null ? cachedFile.contentType : "application/octet-stream";
+            if (data.length <= FOLDER_ENTRY_MEMORY_CACHE_MAX_BYTES) {
+                cachedFile = new CachedFile(data, contentType);
+                synchronized (cacheLock) {
+                    CachedFile oldCache = fileCache.get(cacheKey);
+                    if (oldCache != null) {
+                        currentCacheSize -= oldCache.data.length;
+                    }
+                    fileCache.put(cacheKey, cachedFile);
+                    currentCacheSize += cachedFile.data.length;
+                }
+                log.info("文件夹条目已缓存到内存: fileId={}, path={}, size={} bytes", fileId, entryPath, data.length);
+            } else {
+                cachedDiskFile = cacheFolderEntryToDisk(cacheKey, data, contentType);
+                log.info("文件夹条目已缓存到磁盘: fileId={}, path={}, size={} bytes, file={}",
+                        fileId, entryPath, data.length, cachedDiskFile.path);
+            }
+        }
 
         String rangeHeader = request.getHeader("Range");
-        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-            // Range请求 → 206 Partial Content
-            String range = rangeHeader.substring(6);
-            String[] parts = range.split("-");
-            long start = 0, end = totalLength - 1;
-            try {
-                if (parts.length > 0 && !parts[0].isEmpty()) start = Long.parseLong(parts[0]);
-                if (parts.length > 1 && !parts[1].isEmpty()) end = Long.parseLong(parts[1]);
-            } catch (NumberFormatException e) {
-                response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
-                response.setHeader("Content-Range", "bytes */" + totalLength);
-                return;
-            }
-
-            if (start > end || start < 0 || end >= totalLength) {
-                response.setStatus(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);
-                response.setHeader("Content-Range", "bytes */" + totalLength);
-                return;
-            }
-
-            long contentLength = end - start + 1;
-            response.setContentType(contentType);
-            response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);
-            response.setHeader("Accept-Ranges", "bytes");
-            response.setHeader("Content-Range", "bytes " + start + "-" + end + "/" + totalLength);
-            response.setContentLengthLong(contentLength);
-            response.setHeader("Cache-Control", "no-cache");
-            response.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, Accept-Ranges");
-
-            try (OutputStream os = response.getOutputStream()) {
-                os.write(data, (int) start, (int) contentLength);
-                os.flush();
-            }
-        } else {
-            // 普通请求 → 200 OK + Accept-Ranges 告知浏览器可以Range
-            response.setContentType(contentType);
-            response.setHeader("Accept-Ranges", "bytes");
-            response.setContentLengthLong(totalLength);
-            response.setHeader("Cache-Control", "no-cache");
-            response.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, Accept-Ranges");
-
-            try (OutputStream os = response.getOutputStream()) {
-                os.write(data);
-                os.flush();
-            }
+        if (cachedDiskFile != null && !cachedDiskFile.isExpired() && Files.exists(cachedDiskFile.path)) {
+            writeFolderEntryResponseFromDisk(cachedDiskFile, rangeHeader, response);
+            return;
         }
+
+        if (cachedFile != null && !cachedFile.isExpired()) {
+            writeFolderEntryResponseFromMemory(cachedFile, rangeHeader, response);
+            return;
+        }
+
+        response.setStatus(HttpServletResponse.SC_NOT_FOUND);
     }
 
     /**
@@ -523,8 +747,10 @@ public class FileController {
             fileName = decodedPath.substring(lastSlash + 1);
         }
 
+        String pathBase64 = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(decodedPath.getBytes(StandardCharsets.UTF_8));
         String previewSource = buildAbsoluteApiUrl(request,
-                "/file/folder/preview/" + fileId + "?path=" + urlEncode(decodedPath) + "&token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName));
+            "/file/folder/preview-safe/" + fileId + "/" + pathBase64 + "?token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName));
         String viewerUrl = buildViewerUrl(previewSource);
         return Result.success(viewerUrl);
     }
@@ -553,6 +779,17 @@ public class FileController {
     }
 
     private String buildAbsoluteApiUrl(HttpServletRequest request, String apiPathWithQuery) {
+        if (viewerSourceBaseUrl != null && !viewerSourceBaseUrl.trim().isEmpty()) {
+            String base = viewerSourceBaseUrl.trim();
+            if (base.endsWith("/")) {
+                base = base.substring(0, base.length() - 1);
+            }
+            if (apiPathWithQuery.startsWith("/")) {
+                return base + apiPathWithQuery;
+            }
+            return base + "/" + apiPathWithQuery;
+        }
+
         String scheme = request.getScheme();
         String host = request.getServerName();
         int port = request.getServerPort();

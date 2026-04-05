@@ -113,7 +113,8 @@ secure-file:
   # 提示：kkFileView v4.0.0+ 必须使用 {base64Url}，v4.0 之前使用 {url}
   viewer:
     url-template: "http://10.190.105.17:8012/onlinePreview?url={base64Url}"
-  # 开发时换成自己真实的ip地址，端口8012（kkfile默认的）
+    source-base-url: "http://10.190.105.17:8080/api"
+  # 开发时换成自己真实的ip地址
   
   
 

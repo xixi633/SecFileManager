@@ -57,6 +57,7 @@ public class AuthInterceptor implements HandlerInterceptor {
             String requestUri = request.getRequestURI();
             if (requestUri != null && (requestUri.contains("/file/preview/")
                     || requestUri.contains("/file/folder/preview/")
+                    || requestUri.contains("/file/folder/preview-safe/")
                     || requestUri.contains("/user/avatar"))) {
                 token = request.getParameter("token");
             }
