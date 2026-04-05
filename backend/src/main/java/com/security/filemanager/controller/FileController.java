@@ -599,10 +599,9 @@ public class FileController {
      * 5. 设置正确的Content-Type
      * 6. 流式输出到客户端
      * 
-     * 【大文件预览策略】
-     * - ≤512MB: 解密后缓存到内存，快速响应后续请求
-     * - >512MB且≤2GB: 逐块解密流式输出，避免全量加载到内存
-     * - >2GB: 不支持在线预览
+    * 【大文件预览策略】
+    * - ≤512MB: 解密后缓存到内存，快速响应后续请求
+    * - >512MB: 优先按 Range 请求/逐块解密流式输出，避免全量加载到内存
      */
     @GetMapping("/preview/{fileId}")
     @ApiOperation("文件预览")
@@ -615,14 +614,6 @@ public class FileController {
         Long userId = AuthInterceptor.getCurrentUserId();
 
         com.security.filemanager.entity.FileInfo fileInfo = fileService.getFileInfoForUser(fileId, userId);
-
-        // >2GB: 拒绝预览
-        if (fileService.isLargeFile(fileInfo.getFileSize())) {
-            response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-            response.setContentType("text/plain; charset=UTF-8");
-            response.getWriter().write("文件超过2GB，无法在线预览，请下载后查看");
-            return;
-        }
 
         String rangeHeader = request.getHeader("Range");
 
@@ -642,7 +633,7 @@ public class FileController {
             return;
         }
 
-        // >512MB且≤2GB: 流式输出（逐块解密，不缓存）
+        // >512MB: 流式输出（逐块解密，不缓存）
         streamLargeFilePreview(fileInfo, userId, response);
     }
 

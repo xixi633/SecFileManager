@@ -112,7 +112,10 @@ secure-file:
   # 内置查看器配置（建议反向代理到同域的 /viewer）（目前先用的本机地址，后续需要修改）
   # 提示：kkFileView v4.0.0+ 必须使用 {base64Url}，v4.0 之前使用 {url}
   viewer:
-    url-template: "http://127.0.0.1:8012/onlinePreview?url={base64Url}"
+    url-template: "http://10.190.105.17:8012/onlinePreview?url={base64Url}"
+  # 开发时换成自己真实的ip地址，端口8012（kkfile默认的）
+  
+  
 
   # 系统主密钥（用于加密用户主密钥）
   # 【安全警告】生产环境必须通过环境变量或外部配置文件注入，不能硬编码

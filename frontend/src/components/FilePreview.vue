@@ -8,18 +8,30 @@
     @update:model-value="$emit('update:visible', $event)"
   >
     <div style="min-height: 600px;">
-      <!-- 文件过大提示（>2GB） -->
-      <div v-if="file?.fileSize > previewConfig.maxPreviewSize" style="padding: 100px 0; text-align: center;">
-        <el-icon :size="100" color="#E6A23C"><Warning /></el-icon>
-        <p style="color: #606266; margin-top: 30px; font-size: 18px;">文件过大（超过2GB），暂不支持在线预览</p>
-        <p style="color: #909399; font-size: 14px;">请下载到本地查看</p>
-        <el-button type="primary" @click="$emit('download', file)" style="margin-top: 20px;">
-          下载文件
-        </el-button>
+      <el-alert
+        v-if="file && isOverKkOnlyLimit(file)"
+        title=">2GB 文件预览策略"
+        description="超过 2GB 的文件仅支持 kkFileView 预览，已自动切换为 kkFileView。"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 12px;"
+      />
+
+      <div
+        v-else-if="file"
+        style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px;"
+      >
+        <span style="font-size: 13px; color: #606266;">预览方式</span>
+        <el-radio-group v-model="previewMode" size="small" @change="onPreviewModeChange">
+          <el-radio-button label="auto">自动</el-radio-button>
+          <el-radio-button label="builtin">原生预览</el-radio-button>
+          <el-radio-button label="internal">kkFileView</el-radio-button>
+        </el-radio-group>
       </div>
 
       <!-- 预览失败提示 -->
-      <div v-else-if="previewError" style="padding: 100px 0; text-align: center;">
+      <div v-if="previewError" style="padding: 100px 0; text-align: center;">
         <el-icon :size="80" color="#F56C6C"><Warning /></el-icon>
         <p style="color: #606266; margin-top: 24px; font-size: 18px;">预览失败</p>
         <p style="color: #909399; font-size: 14px; margin-top: 8px;">{{ previewError }}</p>
@@ -40,7 +52,7 @@
         >
           <template #default>
             <div style="font-size: 13px; line-height: 1.5; color: #606266; margin-top: 4px;">
-              系统已全量优先尝试通过高级服务渲染各类文件。若遇到不兼容格式或加载失败，您可以手动重置：
+              当前正在使用 kkFileView 预览。若遇到不兼容格式或加载失败，您可以手动切换：
               <el-button size="small" type="primary" plain @click="fallbackToBuiltinPreview(file)" style="margin-left: 10px;">
                 切换为原生基础预览
               </el-button>
@@ -290,6 +302,8 @@ import JSZip from 'jszip';
 import api from '../api/index.js';
 import { fetchPreviewConfig, fetchViewerUrl, fetchFolderViewerUrl } from '../api/file.js';
 
+const PREVIEW_MODE_STORAGE_KEY = 'previewModePreference';
+
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'];
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'mov', 'm4v'];
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a'];
@@ -303,7 +317,6 @@ const TEXT_EXTENSIONS = ['txt', 'log', 'ini', 'conf', 'properties', 'env'];
 const CODE_EXTENSIONS = ['js', 'ts', 'jsx', 'tsx', 'java', 'py', 'html', 'css', 'scss', 'less', 'json', 'xml', 'sql', 'md', 'markdown', 'yml', 'yaml', 'c', 'cpp', 'h', 'hpp', 'go', 'rs', 'php', 'vue', 'sh', 'bat', 'ps1', 'kt', 'swift', 'rb', 'dockerfile'];
 const ZIP_EXTENSIONS = ['zip'];
 const ARCHIVE_EXTENSIONS = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'];
-const INTERNAL_VIEWER_EXTENSIONS = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'ppt', 'pptx', 'rtf', 'odt', 'ods', 'odp', 'wps', 'et', 'dps', 'xml', 'html', 'htm', 'md', 'markdown', 'txt', 'log', 'json', 'yaml', 'yml', 'properties', 'sql', 'java', 'js', 'ts', 'py', 'cpp', 'c', 'go', 'php', 'vue', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'];
 
 // Worker setup safely
 try {
@@ -348,11 +361,10 @@ const archiveEntries = ref([]);
 const archiveEntryCount = ref(0);
 const archiveSearchKeyword = ref('');
 const viewerUrl = ref('');
-const viewerNote = ref('');
 const useInternalViewer = ref(false);
-const forceBuiltinViewer = ref(false);
 const viewerIframe = ref(null);
 const pptSlidesText = ref([]);
+const previewMode = ref(localStorage.getItem(PREVIEW_MODE_STORAGE_KEY) || 'auto');
 
 const onIframeLoad = (e) => {
   try {
@@ -442,7 +454,30 @@ const isCodeFile = (file) => hasExtension(file, CODE_EXTENSIONS);
 const isTextFile = (file) => hasExtension(file, TEXT_EXTENSIONS) || hasMimePrefix(file, ['text/']);
 const isZipFile = (file) => hasExtension(file, ZIP_EXTENSIONS) || hasMimeIncludes(file, ['zip']);
 const isArchiveFile = (file) => hasExtension(file, ARCHIVE_EXTENSIONS) || hasMimeIncludes(file, ['zip', 'rar', '7z', 'tar', 'gzip', 'bzip', 'xz', 'compress']);
-const canUseInternalViewer = (file) => hasExtension(file, INTERNAL_VIEWER_EXTENSIONS);
+
+const isOverKkOnlyLimit = (file) => (file?.fileSize || 0) > previewConfig.value.maxPreviewSize;
+
+const isFolderEntryFile = (file) => !!(file?.isFolderEntry && file?.parentFolderId && file?.entryPath);
+
+const shouldAutoUseInternalViewer = (file) => {
+  if (!file) return false;
+  // 文件夹内条目优先使用原生，避免 kkFileView 通过容器回源导致性能过慢。
+  if (isFolderEntryFile(file)) return false;
+
+  if (isLegacyWordFile(file) || isLegacyPptFile(file)) return true;
+  if (isPdfFile(file) || isWordFile(file) || isExcelFile(file) || isPptxFile(file)) return true;
+  if (isArchiveFile(file) && !isZipFile(file)) return true;
+  return false;
+};
+
+const resolvePreviewTarget = (file) => {
+  if (!file) return 'builtin';
+  if (isOverKkOnlyLimit(file)) return 'internal';
+
+  if (previewMode.value === 'internal') return 'internal';
+  if (previewMode.value === 'builtin') return 'builtin';
+  return shouldAutoUseInternalViewer(file) ? 'internal' : 'builtin';
+};
 
 const requestInternalViewerUrl = async (file) => {
   try {
@@ -519,28 +554,32 @@ const cleanup = () => {
   archiveEntryCount.value = 0;
   archiveSearchKeyword.value = '';
   viewerUrl.value = '';
-  viewerNote.value = '';
   useInternalViewer.value = false;
-  forceBuiltinViewer.value = false;
   pptSlidesText.value = [];
 };
 
 watch(() => props.visible, async (val) => {
   if (val && props.file) {
-    if (props.file.fileSize > previewConfig.value.maxPreviewSize) {
-      return; 
-    }
     await nextTick();
     previewError.value = '';
-    forceBuiltinViewer.value = false; // 每次打开新的或者重载时重置
     loadPreview(props.file);
   } else {
     cleanup();
   }
 });
 
+watch(previewMode, (val) => {
+  localStorage.setItem(PREVIEW_MODE_STORAGE_KEY, val);
+});
+
+const onPreviewModeChange = () => {
+  if (!props.visible || !props.file) return;
+  previewError.value = '';
+  loadPreview(props.file);
+};
+
 const fallbackToBuiltinPreview = (file) => {
-  forceBuiltinViewer.value = true;
+  previewMode.value = 'builtin';
   useInternalViewer.value = false;
   previewError.value = '';
   loadPreview(file);
@@ -558,14 +597,30 @@ const fallbackToBuiltinPreview = (file) => {
 const loadPreview = async (file) => {
   try {
     useInternalViewer.value = false;
-    
-    // 强制所有文件优先请求高级查看器 URL
-    const internalViewerUrl = (!forceBuiltinViewer.value) ? await requestInternalViewerUrl(file) : '';
 
-    // 优先使用高级查看器 (拦截所有文件)
-    if (internalViewerUrl && !forceBuiltinViewer.value) {
-      viewerUrl.value = internalViewerUrl;
-      useInternalViewer.value = true;
+    const previewTarget = resolvePreviewTarget(file);
+    if (previewTarget === 'internal') {
+      const internalViewerUrl = await requestInternalViewerUrl(file);
+      if (internalViewerUrl) {
+        viewerUrl.value = internalViewerUrl;
+        useInternalViewer.value = true;
+        return;
+      }
+
+      if (isOverKkOnlyLimit(file)) {
+        previewError.value = '当前文件超过 2GB，仅支持 kkFileView 预览，但未获取到有效查看器地址。';
+        return;
+      }
+
+      // 在自动模式下，kkFileView 不可用时降级回原生预览。
+      if (previewMode.value !== 'auto') {
+        previewError.value = 'kkFileView 地址获取失败，请稍后重试或切换为原生预览。';
+        return;
+      }
+    }
+
+    if (isOverKkOnlyLimit(file)) {
+      previewError.value = '超过 2GB 的文件仅支持 kkFileView 预览。';
       return;
     }
 
