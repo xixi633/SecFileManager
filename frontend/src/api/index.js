@@ -1,8 +1,12 @@
 import axios from "axios";
 import { ElMessage } from "element-plus";
 
+const runtimeApiBase =
+  import.meta.env.VITE_API_BASE_URL ||
+  `${window.location.protocol}//${window.location.hostname}:8080/api`;
+
 const api = axios.create({
-  baseURL: "http://localhost:8080/api",
+  baseURL: runtimeApiBase,
   timeout: 300000, // 5分钟超时，用于大文件上传
 });
 
