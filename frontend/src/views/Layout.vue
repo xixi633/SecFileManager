@@ -150,7 +150,7 @@ import { useRouter, useRoute } from 'vue-router';
 import { Document, Setting, Lock, Delete, Files, UserFilled, CaretBottom, ChatLineRound, Bell } from '@element-plus/icons-vue';
 import { useUser } from '../composables/useUser.js';
 import api from '../api/index.js';
-import { listIncomingFriendRequests, unreadCount } from '../api/chat.js';
+import { listIncomingFriendRequests, listSessions } from '../api/chat.js';
 import {
   chatUnreadCount,
   friendRequestCount,
@@ -172,6 +172,7 @@ const messageCenterVisible = ref(false);
 const chatWsRef = ref(null);
 const chatCountInitialized = ref(false);
 const friendRequestCountInitialized = ref(false);
+const MESSAGE_CENTER_REFRESH_INTERVAL_MS = 10 * 1000;
 let chatWsReconnectTimer = null;
 let messageCenterRefreshTimer = null;
 
@@ -197,7 +198,7 @@ onMounted(() => {
   connectChatNotifyWs();
   messageCenterRefreshTimer = window.setInterval(() => {
     refreshMessageCenterSummary();
-  }, 30000);
+  }, MESSAGE_CENTER_REFRESH_INTERVAL_MS);
 });
 
 onBeforeUnmount(() => {
@@ -223,6 +224,11 @@ function buildApiBaseUrl() {
   return base;
 }
 
+function countUnreadFromSessions(rows) {
+  if (!Array.isArray(rows)) return 0;
+  return rows.reduce((sum, item) => sum + Number(item?.unreadCount || 0), 0);
+}
+
 async function refreshChatUnread() {
   const token = localStorage.getItem('token');
   if (!token) {
@@ -231,9 +237,10 @@ async function refreshChatUnread() {
     return;
   }
   try {
-    const res = await unreadCount();
+    const res = await listSessions();
+    const sessionRows = res?.data?.data || [];
     const prevCount = chatUnreadCount.value;
-    const nextCount = Number(res?.data?.data || 0);
+    const nextCount = countUnreadFromSessions(sessionRows);
     setChatUnreadCount(nextCount);
 
     if (chatCountInitialized.value && nextCount > prevCount) {

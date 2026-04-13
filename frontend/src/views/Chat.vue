@@ -490,6 +490,8 @@ function syncActiveTabByRoute() {
 async function loadSessions() {
   const res = await listSessions();
   sessions.value = res?.data?.data || [];
+  const totalUnread = sessions.value.reduce((sum, item) => sum + Number(item?.unreadCount || 0), 0);
+  setChatUnreadCount(totalUnread);
   if (activeSessionId.value) {
     const current = sessions.value.find((item) => item.sessionId === activeSessionId.value);
     if (current) {
