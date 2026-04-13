@@ -713,7 +713,7 @@ public class FileController {
         String fileName = fileInfo.getOriginalFilename();
         String previewSource = buildAbsoluteApiUrl(request,
                 "/file/preview/" + fileId + "?token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName));
-        String viewerUrl = buildViewerUrl(previewSource);
+        String viewerUrl = buildViewerUrl(previewSource, request);
         return Result.success(viewerUrl);
     }
 
@@ -751,16 +751,16 @@ public class FileController {
             .encodeToString(decodedPath.getBytes(StandardCharsets.UTF_8));
         String previewSource = buildAbsoluteApiUrl(request,
             "/file/folder/preview-safe/" + fileId + "/" + pathBase64 + "?token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName));
-        String viewerUrl = buildViewerUrl(previewSource);
+        String viewerUrl = buildViewerUrl(previewSource, request);
         return Result.success(viewerUrl);
     }
 
-    private String buildViewerUrl(String sourceUrl) {
+    private String buildViewerUrl(String sourceUrl, HttpServletRequest request) {
         if (viewerUrlTemplate == null) {
             return "";
         }
         
-        String viewerUrl = viewerUrlTemplate;
+        String viewerUrl = applyRequestPlaceholders(viewerUrlTemplate, request);
         
         if (viewerUrl.contains("{url}")) {
             viewerUrl = viewerUrl.replace("{url}", urlEncode(sourceUrl));
@@ -779,8 +779,9 @@ public class FileController {
     }
 
     private String buildAbsoluteApiUrl(HttpServletRequest request, String apiPathWithQuery) {
-        if (viewerSourceBaseUrl != null && !viewerSourceBaseUrl.trim().isEmpty()) {
-            String base = viewerSourceBaseUrl.trim();
+        if (viewerSourceBaseUrl != null && !viewerSourceBaseUrl.trim().isEmpty()
+                && !"auto".equalsIgnoreCase(viewerSourceBaseUrl.trim())) {
+            String base = applyRequestPlaceholders(viewerSourceBaseUrl.trim(), request);
             if (base.endsWith("/")) {
                 base = base.substring(0, base.length() - 1);
             }
@@ -790,9 +791,14 @@ public class FileController {
             return base + "/" + apiPathWithQuery;
         }
 
-        String scheme = request.getScheme();
-        String host = request.getServerName();
-        int port = request.getServerPort();
+        String scheme = resolveRequestScheme(request);
+        String host = resolveRequestHost(request);
+        int port;
+        try {
+            port = Integer.parseInt(resolveRequestPort(request, scheme));
+        } catch (NumberFormatException e) {
+            port = request.getServerPort();
+        }
         String contextPath = request.getContextPath(); // /api
 
         StringBuilder base = new StringBuilder();
@@ -819,6 +825,127 @@ public class FileController {
             return authHeader.substring(tokenPrefix.length());
         }
         return request.getParameter("token");
+    }
+
+    private String applyRequestPlaceholders(String template, HttpServletRequest request) {
+        if (template == null || template.isEmpty()) {
+            return "";
+        }
+
+        String scheme = resolveRequestScheme(request);
+        String host = resolveRequestHost(request);
+        String port = resolveRequestPort(request, scheme);
+
+        return template
+                .replace("{scheme}", scheme)
+                .replace("{host}", host)
+                .replace("{port}", port);
+    }
+
+    private String resolveRequestScheme(HttpServletRequest request) {
+        String forwardedProto = request.getHeader("X-Forwarded-Proto");
+        if (forwardedProto != null && !forwardedProto.trim().isEmpty()) {
+            return forwardedProto.split(",")[0].trim();
+        }
+        return request.getScheme();
+    }
+
+    private String resolveRequestHost(HttpServletRequest request) {
+        String forwardedHost = request.getHeader("X-Forwarded-Host");
+        if (forwardedHost != null && !forwardedHost.trim().isEmpty()) {
+            return parseHost(forwardedHost.split(",")[0].trim());
+        }
+
+        String hostHeader = request.getHeader("Host");
+        if (hostHeader != null && !hostHeader.trim().isEmpty()) {
+            return parseHost(hostHeader.trim());
+        }
+
+        return request.getServerName();
+    }
+
+    private String resolveRequestPort(HttpServletRequest request, String scheme) {
+        String forwardedPort = request.getHeader("X-Forwarded-Port");
+        if (forwardedPort != null && !forwardedPort.trim().isEmpty()) {
+            return forwardedPort.split(",")[0].trim();
+        }
+
+        String hostHeader = request.getHeader("Host");
+        if (hostHeader != null && !hostHeader.trim().isEmpty()) {
+            String parsed = parsePort(hostHeader.trim());
+            if (parsed != null) {
+                return parsed;
+            }
+        }
+
+        int serverPort = request.getServerPort();
+        if (serverPort > 0) {
+            return String.valueOf(serverPort);
+        }
+
+        if ("https".equalsIgnoreCase(scheme)) {
+            return "443";
+        }
+        return "80";
+    }
+
+    private String parseHost(String hostPort) {
+        if (hostPort == null || hostPort.isEmpty()) {
+            return "";
+        }
+
+        String value = hostPort;
+        int slashIndex = value.indexOf('/');
+        if (slashIndex >= 0) {
+            value = value.substring(0, slashIndex);
+        }
+
+        if (value.startsWith("[")) {
+            int end = value.indexOf(']');
+            if (end > 0) {
+                return value.substring(0, end + 1);
+            }
+            return value;
+        }
+
+        int colonIndex = value.indexOf(':');
+        if (colonIndex > 0) {
+            return value.substring(0, colonIndex);
+        }
+        return value;
+    }
+
+    private String parsePort(String hostPort) {
+        if (hostPort == null || hostPort.isEmpty()) {
+            return null;
+        }
+
+        String value = hostPort;
+        int slashIndex = value.indexOf('/');
+        if (slashIndex >= 0) {
+            value = value.substring(0, slashIndex);
+        }
+
+        if (value.startsWith("[")) {
+            int end = value.indexOf(']');
+            if (end > 0 && end + 1 < value.length() && value.charAt(end + 1) == ':') {
+                return value.substring(end + 2);
+            }
+            return null;
+        }
+
+        int colonIndex = value.lastIndexOf(':');
+        if (colonIndex > 0 && colonIndex + 1 < value.length()) {
+            String candidate = value.substring(colonIndex + 1);
+            for (int i = 0; i < candidate.length(); i++) {
+                if (!Character.isDigit(candidate.charAt(i))) {
+                    return null;
+                }
+            }
+            return candidate;
+        }
+
+        return null;
     }
 
     private String urlEncode(String value) {

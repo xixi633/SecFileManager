@@ -18,6 +18,12 @@ export function resetChunkSession(identifier) {
   });
 }
 
+export function cancelChunkSession(identifier) {
+  return api.post("/file/chunk/session/cancel", null, {
+    params: { identifier }
+  });
+}
+
 export function uploadChunk(formData, onUploadProgress, signal) {
   return api.post("/file/chunk/upload", formData, {
     headers: { "Content-Type": "multipart/form-data" },

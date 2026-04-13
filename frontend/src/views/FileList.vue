@@ -43,17 +43,17 @@
             placeholder="上传文件描述..." 
             class="desc-input"
           />
-          
-          <el-upload
-            :http-request="handleUpload"
-            :show-file-list="false"
-            :disabled="uploadingFile"
-            class="upload-inline"
-          >
-            <el-button type="primary" :loading="uploadingFile" :icon="Upload" class="action-btn">
-              {{ uploadingFile ? '上传中...' : '上传文件' }}
-            </el-button>
-          </el-upload>
+
+          <input
+            ref="fileInput"
+            type="file"
+            multiple
+            style="display: none"
+            @change="handleFileSelect"
+          />
+          <el-button type="primary" :icon="Upload" class="action-btn" @click="selectFiles">
+            上传文件（最多10个）
+          </el-button>
           
           <input
             ref="folderInput"
@@ -64,7 +64,7 @@
             style="display: none"
             @change="handleFolderSelect"
           />
-          <el-button type="success" @click="selectFolder" :disabled="uploadingFile" :icon="FolderAdd" class="action-btn">
+          <el-button type="success" @click="selectFolder" :icon="FolderAdd" class="action-btn">
             上传目录
           </el-button>
         </div>
@@ -119,6 +119,44 @@
         </div>
       </transition>
     </el-card>
+
+    <transition name="el-zoom-in-top">
+      <el-card v-if="uploadTasks.length > 0" class="upload-list-card" shadow="never">
+        <div class="upload-list-header">
+          <span>上传列表（{{ uploadTasks.length }}）</span>
+          <el-button text type="primary" @click="clearFinishedTasks">清理已结束</el-button>
+        </div>
+        <el-table :data="uploadTasks" size="small" border max-height="260">
+          <el-table-column prop="name" label="文件" min-width="220" show-overflow-tooltip />
+          <el-table-column label="状态" width="110" align="center">
+            <template #default="scope">
+              <el-tag size="small" :type="getTaskStatusType(scope.row.status)">
+                {{ getTaskStatusText(scope.row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="进度" min-width="180">
+            <template #default="scope">
+              <el-progress :percentage="scope.row.progress" :stroke-width="6" :show-text="false" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="speed" label="速度" width="160" show-overflow-tooltip />
+          <el-table-column label="操作" width="220" align="center">
+            <template #default="scope">
+              <el-button link type="warning" :disabled="!canCancelTask(scope.row)" @click="cancelTask(scope.row)">
+                取消
+              </el-button>
+              <el-button link type="primary" :disabled="!canRetryTask(scope.row)" @click="retryTask(scope.row)">
+                重试
+              </el-button>
+              <el-button link type="danger" :disabled="!canRemoveTask(scope.row)" @click="removeTask(scope.row)">
+                移除
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+    </transition>
 
     <el-card class="table-card" shadow="never">
       <div class="table-header">
@@ -226,15 +264,13 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, watch, computed } from "vue";
+import { ref, onMounted, watch, computed } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Document, HomeFilled, Folder, Search, Refresh, Upload, FolderAdd, Monitor, ArrowRight } from '@element-plus/icons-vue';
 import JSZip from "jszip";
-import api from "../api/index.js";
 import FileTable from "../components/FileTable.vue";
 import FilePreview from "../components/FilePreview.vue";
-import HashWorker from '../workers/hash.worker.js?worker';
 import {
   uploadingFile,
   uploadPercentage,
@@ -257,12 +293,10 @@ import {
   deleteFile,
   updateFileDescription,
   fetchFolderEntries,
-  checkChunk,
   fetchChunkSessionStatus,
-  resetChunkSession,
+  cancelChunkSession,
   uploadChunk,
   mergeChunks,
-  previewFolderEntry,
   downloadFolderEntry,
   deleteFolderEntry,
 } from "../api/file.js";
@@ -273,8 +307,8 @@ import { TYPE_CATEGORY_OPTIONS, getFileTypeCategory } from "../utils/fileType.js
 const router = useRouter();
 const files = ref([]);
 const description = ref("");
+const fileInput = ref(null);
 const folderInput = ref(null);
-const uploadProgress = ref({ current: 0, total: 0 });
 const folderDialogVisible = ref(false);
 const currentFolder = ref(null);
 const folderFiles = ref([]);
@@ -304,12 +338,15 @@ const multiSelectEnabled = ref(false);
 const selectedRows = ref([]);
 const selectedCount = computed(() => selectedRows.value.length);
 const hasSelection = computed(() => selectedRows.value.length > 0);
-const uploadAbortController = ref(null);
-const currentUploadingIdentifier = ref('');
-const pendingUploadName = ref('');
-const pendingUploadSize = ref(0);
-const pendingUploadIsFolder = ref(0);
 const typeCategoryOptions = TYPE_CATEGORY_OPTIONS;
+
+const MAX_BATCH_UPLOAD_COUNT = 10;
+const LARGE_FILE_CHUNK_SIZE = 32 * 1024 * 1024;
+const CHUNK_UPLOAD_CONCURRENCY = 2;
+const uploadTasks = ref([]);
+const uploadQueueRunning = ref(false);
+const currentTaskId = ref('');
+let uploadTaskCounter = 0;
 
 
 
@@ -488,35 +525,6 @@ const formatBytes = (bytes) => {
   return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
 };
 
-const updateUploadProgress = (loaded, total) => {
-  if (!total || Number.isNaN(total)) {
-    uploadPercentage.value = Math.min(99, Math.max(uploadPercentage.value, 1));
-    uploadStatus.value = `${formatBytes(loaded)} / ?`;
-  } else {
-    const percentCompleted = Math.round((loaded * 100) / total);
-    uploadPercentage.value = Math.min(100, percentCompleted);
-    uploadStatus.value = `${formatBytes(loaded)} / ${formatBytes(total)}`;
-  }
-
-  const timeElapsed = (Date.now() - uploadStartTime.value) / 1000;
-  if (timeElapsed > 0) {
-    const speed = loaded / timeElapsed;
-    uploadSpeed.value = `上传速度: ${formatBytes(speed)}/s`;
-  }
-};
-
-const waitForFileVisible = async (fileId, timeoutMs = 120000) => {
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeoutMs) {
-    await loadFiles();
-    if (fileId && files.value.some(item => item.id === fileId)) {
-      return true;
-    }
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  return false;
-};
-
 const startBrowseProgress = (status = '正在加载文件夹内容...') => {
   browseLoading.value = true;
   browseIndeterminate.value = true;
@@ -558,268 +566,444 @@ const validateUploadFile = (file) => {
   return true;
 };
 
+const TASK_STATUS_LABEL = {
+  queued: '排队中',
+  compressing: '压缩中',
+  uploading: '上传中',
+  finalizing: '处理中',
+  success: '已完成',
+  failed: '失败',
+  canceled: '已取消'
+};
 
-const handleUpload = async (options) => {
-  if (!validateUploadFile(options.file)) {
+const TASK_STATUS_TAG_TYPE = {
+  queued: 'info',
+  compressing: 'warning',
+  uploading: 'primary',
+  finalizing: 'warning',
+  success: 'success',
+  failed: 'danger',
+  canceled: 'info'
+};
+
+const getTaskStatusText = (status) => TASK_STATUS_LABEL[status] || status;
+const getTaskStatusType = (status) => TASK_STATUS_TAG_TYPE[status] || 'info';
+
+const canCancelTask = (task) => ['queued', 'compressing', 'uploading', 'finalizing'].includes(task?.status);
+const canRetryTask = (task) => ['failed', 'canceled'].includes(task?.status);
+const canRemoveTask = (task) => !['compressing', 'uploading', 'finalizing'].includes(task?.status);
+
+const createTaskId = () => {
+  uploadTaskCounter += 1;
+  return `upload_${Date.now()}_${uploadTaskCounter}`;
+};
+
+const createUploadTask = ({ kind, name, file, folderFiles, folderName }) => ({
+  id: createTaskId(),
+  kind,
+  name,
+  file,
+  folderFiles,
+  folderName,
+  description: description.value || '',
+  progress: 0,
+  status: 'queued',
+  statusText: '等待上传',
+  speed: '',
+  errorMessage: '',
+  abortController: null,
+  identifier: '',
+  startedAt: 0,
+  finishedAt: 0
+});
+
+const getTaskById = (taskId) => uploadTasks.value.find((task) => task.id === taskId);
+
+const resetCurrentUploadDisplay = () => {
+  uploadingFile.value = false;
+  uploadPercentage.value = 0;
+  uploadStatus.value = '';
+  uploadSpeed.value = '';
+  uploadProcessing.value = false;
+};
+
+const syncCurrentUploadDisplay = (task) => {
+  if (!task) {
+    resetCurrentUploadDisplay();
     return;
   }
 
-  const file = options.file;
-  const CHUNK_SIZE = 32 * 1024 * 1024; // 32MB 分片，减少请求次数
-  const isLargeFile = file.size > CHUNK_SIZE;
-  const CONCURRENT_UPLOADS = 2; // 小并发提升带宽利用，后端可重排写入
-  const ENABLE_CHUNK_CHECK = false; // 关闭逐分片探测，减少额外请求
+  uploadingFile.value = ['compressing', 'uploading', 'finalizing'].includes(task.status);
+  uploadProcessing.value = task.status === 'finalizing';
+  uploadPercentage.value = task.progress;
+  uploadStatus.value = `${task.name} - ${task.statusText || getTaskStatusText(task.status)}`;
+  uploadSpeed.value = task.speed || '';
+};
 
-  uploadingFile.value = true;
-  uploadPercentage.value = 0;
-  uploadStartTime.value = Date.now();
-  uploadAbortController.value = new AbortController();
-  uploadProcessing.value = false;
-  uploadSpeed.value = '';
-  pendingUploadName.value = file.name;
-  pendingUploadSize.value = file.size;
-  pendingUploadIsFolder.value = 0;
-  
-  if (!isLargeFile) {
-      // ===== 小文件直接上传 =====
-      uploadStatus.value = '上传中...';
-      const formData = new FormData();
-      formData.append("file", file);
-
-      try {
-        const res = await uploadFile(formData, description.value, (progressEvent) => {
-          updateUploadProgress(progressEvent.loaded, progressEvent.total);
-        }, undefined, uploadAbortController.value?.signal);
-        if (res?.data?.code !== 200) {
-          throw new Error(res?.data?.message || '上传失败');
-        }
-        await handleUploadSuccess(res?.data?.data);
-      } catch (e) {
-        handleUploadError(e);
-      }
-  } else {
-      // ===== 大文件分片上传 =====
-      try {
-          uploadStatus.value = '正在初始化上传...';
-          const identifier = createUploadIdentifier(file);
-          currentUploadingIdentifier.value = identifier;
-          
-          const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-
-          let startChunkNumber = 0;
-          try {
-            const statusRes = await fetchChunkSessionStatus(identifier);
-            const statusData = statusRes?.data?.data;
-            if (statusData && ['UPLOADING', 'FINALIZING'].includes(statusData.stage)) {
-              startChunkNumber = Number(statusData.nextChunkNumber || 0);
-              if (startChunkNumber > 0) {
-                uploadStatus.value = `检测到断点，准备从第 ${startChunkNumber + 1} 片继续上传...`;
-              }
-            }
-          } catch (_) {
-            // 会话不存在或已过期时从头上传
-            startChunkNumber = 0;
-          }
-          
-          // 维护每个分片的上传进度 { chunkNumber: loadedBytes }
-          const chunkProgress = new Map();
-          
-          const updateTotalProgress = () => {
-              let totalLoaded = 0;
-              for (const loaded of chunkProgress.values()) {
-                  totalLoaded += loaded;
-              }
-              updateUploadProgress(totalLoaded, file.size);
-          };
-
-          const limit = pLimit(CONCURRENT_UPLOADS);
-          const tasks = [];
-          
-          uploadStatus.value = `正在上传分片（并发 ${CONCURRENT_UPLOADS}）...`;
-
-          for (let chunkNumber = startChunkNumber; chunkNumber < totalChunks; chunkNumber++) {
-              tasks.push(limit(async () => {
-                  if (!uploadingFile.value) throw new Error("上传已取消");
-
-                  // 默认不做分片探测，直接上传以减少 RTT；需要断点续传时再开启
-                  if (ENABLE_CHUNK_CHECK) {
-                      const res = await checkChunk(identifier, chunkNumber);
-                      if (res.data.data) {
-                          const start = chunkNumber * CHUNK_SIZE;
-                          const end = Math.min(start + CHUNK_SIZE, file.size);
-                          chunkProgress.set(chunkNumber, end - start);
-                          updateTotalProgress();
-                          return;
-                      }
-                  }
-
-                  const start = chunkNumber * CHUNK_SIZE;
-                  const end = Math.min(start + CHUNK_SIZE, file.size);
-                  const chunk = file.slice(start, end);
-                  
-                  const formData = new FormData();
-                  formData.append("file", chunk);
-                  formData.append("chunkNumber", chunkNumber);
-                  formData.append("chunkSize", CHUNK_SIZE);
-                  formData.append("currentChunkSize", chunk.size);
-                  formData.append("totalSize", file.size);
-                  formData.append("identifier", identifier);
-                  formData.append("filename", file.name);
-                  formData.append("totalChunks", totalChunks);
-                  
-                  await uploadChunk(formData, (p) => {
-                       chunkProgress.set(chunkNumber, p.loaded);
-                       updateTotalProgress();
-                  }, uploadAbortController.value?.signal);
-                  
-                  // Ensure full size is set when done
-                  chunkProgress.set(chunkNumber, chunk.size);
-                  updateTotalProgress();
-              }));
-          }
-          
-          await Promise.all(tasks);
-          
-          uploadStatus.value = '正在提交完成...';
-          uploadProcessing.value = true;
-          const mergeRes = await mergeChunks(identifier, file.name, totalChunks, file.size);
-          if (mergeRes?.data?.code !== 200) {
-               throw new Error(mergeRes?.data?.message || '完成上传失败');
-          }
-          await handleUploadSuccess(mergeRes?.data?.data || null, false);
-      } catch (e) {
-          handleUploadError(e);
-      }
+const setTaskStatus = (task, status, statusText = '') => {
+  task.status = status;
+  if (statusText) {
+    task.statusText = statusText;
+  }
+  if (task.id === currentTaskId.value) {
+    syncCurrentUploadDisplay(task);
   }
 };
 
-const handleUploadSuccess = async (fileId, isAsync = false) => {
-    uploadPercentage.value = 100;
-    uploadStatus.value = '上传完成';
-    uploadProcessing.value = false;
-    ElMessage.success("上传成功");
+const updateTaskSpeed = (task, loadedBytes) => {
+  if (!task.startedAt) return;
+  const elapsedSeconds = (Date.now() - task.startedAt) / 1000;
+  if (elapsedSeconds <= 0) return;
+  task.speed = `上传速度: ${formatBytes(loadedBytes / elapsedSeconds)}/s`;
+};
 
-    const canOptimisticInsert = !currentFolderId.value && pagination.value.page === 1
-      && !searchFileName.value && !searchDescription.value && !searchKeyword.value;
-
-    if (fileId && canOptimisticInsert) {
-      const optimistic = {
-        id: fileId,
-        originalFilename: pendingUploadName.value || '新文件',
-        fileSize: pendingUploadSize.value || 0,
-        fileType: '',
-        uploadTime: new Date().toISOString(),
-        description: description.value || '',
-        isFolder: pendingUploadIsFolder.value || 0,
-      };
-      files.value = [optimistic, ...files.value.filter(item => item.id !== fileId)].slice(0, pagination.value.size);
-      pagination.value.total += 1;
-      setTimeout(() => { loadFiles(); }, 800);
-    } else {
-      await loadFiles();
-    }
-
-    description.value = "";
-
-    // 重置状态
-    setTimeout(() => {
-         uploadingFile.value = false;
-         uploadPercentage.value = 0;
-         uploadStatus.value = '';
-         uploadAbortController.value = null;
-         currentUploadingIdentifier.value = '';
-         pendingUploadName.value = '';
-         pendingUploadSize.value = 0;
-         pendingUploadIsFolder.value = 0;
-    }, 700);
-}
-
-const handleUploadError = (e) => {
-    if (e?.name !== 'CanceledError' && e?.code !== 'ERR_CANCELED') {
-      ElMessage.error(e.message || '上传失败');
-    }
-    uploadProcessing.value = false;
-    uploadingFile.value = false;
-    uploadPercentage.value = 0;
-    uploadAbortController.value = null;
-    currentUploadingIdentifier.value = '';
-}
-
-
-const onCancelUpload = async () => {
-  if (!uploadingFile.value) return;
-  try {
-    if (uploadAbortController.value) {
-      uploadAbortController.value.abort();
-    }
-    if (currentUploadingIdentifier.value) {
-      await resetChunkSession(currentUploadingIdentifier.value);
-    }
-    uploadingFile.value = false;
-    uploadProcessing.value = false;
-    uploadPercentage.value = 0;
-    uploadStatus.value = '';
-    uploadSpeed.value = '';
-    uploadAbortController.value = null;
-    currentUploadingIdentifier.value = '';
-    ElMessage.success('已取消上传');
-  } catch (e) {
-    // 由拦截器提示
+const updateTaskProgressByBytes = (task, loaded, total, statusPrefix = '上传中') => {
+  if (!total || Number.isNaN(total)) {
+    task.progress = Math.min(99, Math.max(task.progress, 1));
+    task.statusText = `${statusPrefix}: ${formatBytes(loaded)} / ?`;
+  } else {
+    task.progress = Math.min(99, Math.round((loaded * 100) / total));
+    task.statusText = `${statusPrefix}: ${formatBytes(loaded)} / ${formatBytes(total)}`;
   }
-}
-
-const onResetUploadSession = async () => {
-  if (!uploadingFile.value) return;
-  try {
-    const fileInput = document.querySelector('.el-upload input[type=file]');
-    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-      ElMessage.warning('未找到当前上传文件，请重新选择后上传');
-      return;
-    }
-    let identifier = currentUploadingIdentifier.value;
-    if (!identifier) {
-      const file = fileInput.files[0];
-      identifier = createUploadIdentifier(file);
-    }
-    await resetChunkSession(identifier);
-    uploadingFile.value = false;
-    uploadProcessing.value = false;
-    uploadPercentage.value = 0;
-    uploadStatus.value = '';
-    uploadSpeed.value = '';
-    ElMessage.success('上传会话已重置，请重新上传');
-  } catch (e) {
-    // 由拦截器提示
+  updateTaskSpeed(task, loaded);
+  if (task.id === currentTaskId.value) {
+    syncCurrentUploadDisplay(task);
   }
-}
+};
+
+const updateTaskProgressByPercent = (task, percent, statusText = '') => {
+  task.progress = Math.max(0, Math.min(99, Math.round(percent)));
+  if (statusText) {
+    task.statusText = statusText;
+  }
+  if (task.id === currentTaskId.value) {
+    syncCurrentUploadDisplay(task);
+  }
+};
+
+const isCanceledError = (error) => {
+  return error?.name === 'CanceledError'
+    || error?.code === 'ERR_CANCELED'
+    || error?.message === 'UPLOAD_CANCELED';
+};
 
 const createUploadIdentifier = (file) => `${file.name}__${file.size}__${file.lastModified}`;
 
-const computeMD5 = (file) => {
-    return new Promise((resolve, reject) => {
-        const worker = new HashWorker();
-        // 通知Worker开始计算
-        worker.postMessage({ file });
-        
-        // 监听进度与结果
-        worker.onmessage = (e) => {
-             const { type, hash, progress, error } = e.data;
-             if (type === 'progress') {
-                  uploadStatus.value = `计算指纹... ${progress}%`;
-             } else if (type === 'result') {
-                  worker.terminate();
-                  resolve(hash);
-             } else if (type === 'error') {
-                  worker.terminate();
-                  reject(error);
-             }
-        };
-        
-        worker.onerror = (err) => {
-             worker.terminate();
-             reject(err);
-        };
-    });
+const enqueueUploadTasks = (tasks) => {
+  if (!tasks.length) return;
+  uploadTasks.value.push(...tasks);
+  runUploadQueue();
+};
+
+const selectFiles = () => {
+  fileInput.value?.click();
+};
+
+const handleFileSelect = (event) => {
+  const selectedFiles = Array.from(event.target.files || []);
+  if (selectedFiles.length === 0) return;
+
+  if (selectedFiles.length > MAX_BATCH_UPLOAD_COUNT) {
+    ElMessage.warning(`一次最多上传 ${MAX_BATCH_UPLOAD_COUNT} 个文件`);
+    event.target.value = '';
+    return;
+  }
+
+  const validFiles = selectedFiles.filter((file) => validateUploadFile(file));
+  if (validFiles.length === 0) {
+    event.target.value = '';
+    return;
+  }
+
+  const tasks = validFiles.map((file) => createUploadTask({
+    kind: 'file',
+    name: file.name,
+    file
+  }));
+
+  enqueueUploadTasks(tasks);
+  ElMessage.success(`已加入上传列表: ${tasks.length} 个文件`);
+  event.target.value = '';
+};
+
+const clearFinishedTasks = () => {
+  uploadTasks.value = uploadTasks.value.filter((task) => ['queued', 'compressing', 'uploading', 'finalizing'].includes(task.status));
+};
+
+const removeTask = (task) => {
+  if (!canRemoveTask(task)) return;
+  uploadTasks.value = uploadTasks.value.filter((item) => item.id !== task.id);
+};
+
+const retryTask = (task) => {
+  if (!canRetryTask(task)) return;
+
+  const retrySource = task.kind === 'folder'
+    ? createUploadTask({
+        kind: 'folder',
+        name: task.name,
+        folderName: task.folderName,
+        folderFiles: task.folderFiles
+      })
+    : createUploadTask({
+        kind: 'file',
+        name: task.name,
+        file: task.file
+      });
+
+  uploadTasks.value.push(retrySource);
+  runUploadQueue();
+};
+
+const cancelTask = async (task) => {
+  if (!task || !canCancelTask(task)) return;
+
+  if (task.status === 'queued') {
+    setTaskStatus(task, 'canceled', '已取消（未开始）');
+    return;
+  }
+
+  setTaskStatus(task, 'canceled', '正在取消...');
+
+  if (task.abortController) {
+    task.abortController.abort();
+  }
+
+  if (task.identifier) {
+    try {
+      await cancelChunkSession(task.identifier);
+    } catch (_) {
+      // 会话已结束时无需额外处理
+    }
+  }
+};
+
+const onCancelUpload = async () => {
+  const task = getTaskById(currentTaskId.value);
+  if (!task) return;
+  await cancelTask(task);
+  ElMessage.success('已取消当前上传');
+};
+
+const onResetUploadSession = async () => {
+  const task = getTaskById(currentTaskId.value);
+  if (!task) {
+    ElMessage.warning('当前没有可重传任务');
+    return;
+  }
+  await cancelTask(task);
+  retryTask(task);
+  ElMessage.success('已加入重传队列');
+};
+
+const runFileUploadTask = async (task) => {
+  const file = task.file;
+  if (!file) throw new Error('文件对象丢失，无法上传');
+
+  if (file.size <= LARGE_FILE_CHUNK_SIZE) {
+    setTaskStatus(task, 'uploading', '上传中');
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await uploadFile(
+      formData,
+      task.description,
+      (progressEvent) => {
+        updateTaskProgressByBytes(task, progressEvent.loaded, progressEvent.total, '上传中');
+      },
+      undefined,
+      task.abortController?.signal
+    );
+
+    if (response?.data?.code !== 200) {
+      throw new Error(response?.data?.message || '上传失败');
+    }
+    return;
+  }
+
+  const identifier = createUploadIdentifier(file);
+  task.identifier = identifier;
+  const totalChunks = Math.ceil(file.size / LARGE_FILE_CHUNK_SIZE);
+
+  let startChunkNumber = 0;
+  try {
+    const statusResponse = await fetchChunkSessionStatus(identifier);
+    const statusData = statusResponse?.data?.data;
+    if (statusData && ['UPLOADING', 'FINALIZING'].includes(statusData.stage)) {
+      startChunkNumber = Number(statusData.nextChunkNumber || 0);
+    }
+  } catch (_) {
+    startChunkNumber = 0;
+  }
+
+  const chunkProgress = new Map();
+  const limit = pLimit(CHUNK_UPLOAD_CONCURRENCY);
+  const chunkTasks = [];
+
+  setTaskStatus(task, 'uploading', `上传分片中（并发 ${CHUNK_UPLOAD_CONCURRENCY}）`);
+
+  for (let chunkNumber = startChunkNumber; chunkNumber < totalChunks; chunkNumber += 1) {
+    chunkTasks.push(limit(async () => {
+      if (task.status === 'canceled' || task.abortController?.signal.aborted) {
+        throw new Error('UPLOAD_CANCELED');
+      }
+
+      const start = chunkNumber * LARGE_FILE_CHUNK_SIZE;
+      const end = Math.min(start + LARGE_FILE_CHUNK_SIZE, file.size);
+      const chunk = file.slice(start, end);
+
+      const formData = new FormData();
+      formData.append('file', chunk);
+      formData.append('chunkNumber', chunkNumber);
+      formData.append('chunkSize', LARGE_FILE_CHUNK_SIZE);
+      formData.append('currentChunkSize', chunk.size);
+      formData.append('totalSize', file.size);
+      formData.append('identifier', identifier);
+      formData.append('filename', file.name);
+      formData.append('totalChunks', totalChunks);
+
+      await uploadChunk(
+        formData,
+        (progress) => {
+          chunkProgress.set(chunkNumber, progress.loaded);
+          let loadedBytes = 0;
+          for (const loaded of chunkProgress.values()) {
+            loadedBytes += loaded;
+          }
+          updateTaskProgressByBytes(task, loadedBytes, file.size, '上传分片');
+        },
+        task.abortController?.signal
+      );
+
+      chunkProgress.set(chunkNumber, chunk.size);
+      let loadedBytes = 0;
+      for (const loaded of chunkProgress.values()) {
+        loadedBytes += loaded;
+      }
+      updateTaskProgressByBytes(task, loadedBytes, file.size, '上传分片');
+    }));
+  }
+
+  await Promise.all(chunkTasks);
+
+  setTaskStatus(task, 'finalizing', '正在提交完成');
+  const mergeResponse = await mergeChunks(identifier, file.name, totalChunks, file.size);
+  if (mergeResponse?.data?.code !== 200) {
+    throw new Error(mergeResponse?.data?.message || '完成上传失败');
+  }
+};
+
+const runFolderUploadTask = async (task) => {
+  const fileList = task.folderFiles || [];
+  if (fileList.length === 0) throw new Error('文件夹为空，无法上传');
+
+  const folderName = task.folderName || 'folder';
+  setTaskStatus(task, 'compressing', `正在打包 ${fileList.length} 个文件`);
+
+  const zip = new JSZip();
+  for (const file of fileList) {
+    const relativePath = file.webkitRelativePath || file.name;
+    zip.file(relativePath, file);
+  }
+
+  const zipBlob = await zip.generateAsync(
+    {
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 1 }
+    },
+    (metadata) => {
+      const packPercent = Math.round(metadata.percent || 0);
+      updateTaskProgressByPercent(task, packPercent * 0.3, `压缩中 ${packPercent}%`);
+    }
+  );
+
+  if (task.status === 'canceled' || task.abortController?.signal.aborted) {
+    throw new Error('UPLOAD_CANCELED');
+  }
+
+  const zipFile = new File([zipBlob], `${folderName}.zip`, { type: 'application/zip' });
+  if (zipFile.size === 0) {
+    throw new Error('不能上传空文件夹');
+  }
+
+  setTaskStatus(task, 'uploading', '上传压缩包中');
+  const formData = new FormData();
+  formData.append('file', zipFile);
+  formData.append('isFolder', '1');
+
+  const response = await uploadFile(
+    formData,
+    task.description || `文件夹: ${folderName}`,
+    (progressEvent) => {
+      const total = progressEvent.total || zipFile.size;
+      const loaded = progressEvent.loaded || 0;
+      const uploadPercent = total > 0 ? Math.round((loaded * 70) / total) : 0;
+      updateTaskProgressByPercent(task, 30 + uploadPercent, `上传压缩包: ${formatBytes(loaded)} / ${formatBytes(total)}`);
+      updateTaskSpeed(task, loaded);
+    },
+    1,
+    task.abortController?.signal
+  );
+
+  if (response?.data?.code !== 200) {
+    throw new Error(response?.data?.message || '上传失败');
+  }
+};
+
+const executeUploadTask = async (task) => {
+  currentTaskId.value = task.id;
+  task.startedAt = Date.now();
+  task.abortController = new AbortController();
+  task.errorMessage = '';
+  uploadStartTime.value = task.startedAt;
+
+  try {
+    if (task.kind === 'folder') {
+      await runFolderUploadTask(task);
+    } else {
+      await runFileUploadTask(task);
+    }
+
+    if (task.status !== 'canceled') {
+      task.progress = 100;
+      task.speed = '';
+      setTaskStatus(task, 'success', '上传完成');
+      await loadFiles();
+      ElMessage.success(`${task.name} 上传成功`);
+    }
+  } catch (error) {
+    if (isCanceledError(error) || task.status === 'canceled') {
+      setTaskStatus(task, 'canceled', '已取消');
+    } else {
+      task.errorMessage = error?.message || '上传失败';
+      task.speed = '';
+      setTaskStatus(task, 'failed', task.errorMessage);
+      ElMessage.error(`${task.name} 上传失败: ${task.errorMessage}`);
+    }
+  } finally {
+    task.abortController = null;
+    task.identifier = '';
+    task.finishedAt = Date.now();
+    if (currentTaskId.value === task.id) {
+      syncCurrentUploadDisplay(task);
+    }
+  }
+};
+
+const runUploadQueue = async () => {
+  if (uploadQueueRunning.value) return;
+  uploadQueueRunning.value = true;
+
+  while (true) {
+    const nextTask = uploadTasks.value.find((task) => task.status === 'queued');
+    if (!nextTask) break;
+    await executeUploadTask(nextTask);
+  }
+
+  uploadQueueRunning.value = false;
+  currentTaskId.value = '';
+  resetCurrentUploadDisplay();
 };
 
 
@@ -1032,114 +1216,27 @@ const onBrowseFolder = async (row) => {
   }
 };
 
-const handleFolderSelect = async (event) => {
-  const fileList = Array.from(event.target.files);
+const handleFolderSelect = (event) => {
+  const fileList = Array.from(event.target.files || []);
   if (fileList.length === 0) return;
 
-  uploadingFile.value = true;
-  uploadPercentage.value = 0;
-  uploadStartTime.value = Date.now();
-  uploadAbortController.value = new AbortController();
-
-  try {
-    // 获取文件夹名称
-    const folderName = fileList[0].webkitRelativePath?.split('/')[0] || 'folder';
-    if (isInvalidFileName(folderName)) {
-      ElMessage.warning('文件夹名称不合法或过长（<=255），请重命名后再上传');
-      uploadingFile.value = false;
-      uploadStatus.value = '';
-      uploadSpeed.value = '';
-      return;
-    }
-    
-    uploadStatus.value = `正在打包 ${fileList.length} 个文件...`;
-    pendingUploadName.value = `${folderName}.zip`;
-    pendingUploadIsFolder.value = 1;
-    
-    // 创建ZIP压缩包
-    const zip = new JSZip();
-    
-    for (const file of fileList) {
-      const relativePath = file.webkitRelativePath || file.name;
-      zip.file(relativePath, file);
-    }
-    
-    uploadStatus.value = '正在压缩文件...';
-    
-    // 生成ZIP文件
-    const zipBlob = await zip.generateAsync({ 
-      type: "blob",
-      compression: "DEFLATE",
-      compressionOptions: { level: 1 }
-    }, (metadata) => {
-      const packPercent = Math.round(metadata.percent || 0);
-      uploadPercentage.value = Math.min(30, Math.round(packPercent * 0.3));
-      uploadStatus.value = `正在压缩文件... ${packPercent}%`;
-      uploadSpeed.value = '';
-    });
-    
-    // 创建ZIP文件对象
-    const zipFile = new File([zipBlob], `${folderName}.zip`, { type: 'application/zip' });
-    pendingUploadSize.value = zipFile.size;
-    if (zipFile.size === 0) {
-      ElMessage.warning('不能上传空文件夹');
-      uploadingFile.value = false;
-      uploadStatus.value = '';
-      uploadSpeed.value = '';
-      return;
-    }
-    
-    uploadStatus.value = '开始上传...';
-    
-    // 上传ZIP文件
-    const formData = new FormData();
-    formData.append("file", zipFile);
-    formData.append("isFolder", "1"); // 标记为文件夹
-    
-    const res = await uploadFile(
-      formData,
-      description.value || `文件夹: ${folderName}`,
-      (progressEvent) => {
-        const total = progressEvent.total || zipFile.size;
-        const loaded = progressEvent.loaded || 0;
-        const uploadPhasePercent = total > 0 ? Math.round((loaded * 70) / total) : 0;
-        uploadPercentage.value = Math.min(99, 30 + uploadPhasePercent);
-        uploadStatus.value = `上传压缩包: ${formatBytes(loaded)} / ${formatBytes(total)}`;
-
-        const timeElapsed = (Date.now() - uploadStartTime.value) / 1000;
-        if (timeElapsed > 0) {
-          const speed = loaded / timeElapsed;
-          uploadSpeed.value = `上传速度: ${formatBytes(speed)}/s`;
-        }
-      },
-      1,
-      uploadAbortController.value?.signal
-    );
-    if (res?.data?.code !== 200) {
-      throw new Error(res?.data?.message || '上传失败');
-    }
-    
-    const fileId = res?.data?.data;
-    uploadPercentage.value = 100;
-    uploadStatus.value = '上传完成';
-    uploadSpeed.value = '';
-    uploadProcessing.value = false;
-
-    pagination.value.page = 1;
-    await handleUploadSuccess(fileId, false);
-    ElMessage.success(`文件夹上传成功: ${folderName}`);
-    event.target.value = ""; // 重置input
-    
-  } catch (e) {
-    const msg = e?.response?.data?.message || e?.message || '上传失败';
-    ElMessage.error(`文件夹上传失败: ${msg}`);
-  } finally {
-    uploadProcessing.value = false;
-    uploadingFile.value = false;
-    uploadPercentage.value = 0;
-    uploadStatus.value = '';
-    uploadSpeed.value = '';
+  const folderName = fileList[0].webkitRelativePath?.split('/')[0] || 'folder';
+  if (isInvalidFileName(folderName)) {
+    ElMessage.warning('文件夹名称不合法或过长（<=255），请重命名后再上传');
+    event.target.value = '';
+    return;
   }
+
+  const task = createUploadTask({
+    kind: 'folder',
+    name: `${folderName}.zip`,
+    folderName,
+    folderFiles: fileList
+  });
+
+  enqueueUploadTasks([task]);
+  ElMessage.success(`目录已加入上传列表: ${folderName}`);
+  event.target.value = '';
 };
 
 // 文件预览相关方法
@@ -1238,6 +1335,22 @@ onMounted(loadFiles);
   margin-bottom: 6px;
   font-size: 12px;
   color: #909399;
+}
+
+.upload-list-card {
+  border-radius: 12px;
+  border: none;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
+
+.upload-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: #606266;
+  font-size: 14px;
+  font-weight: 500;
 }
 
 /* Table Card */
