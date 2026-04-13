@@ -170,4 +170,27 @@ public class UserController {
 
         return new ResponseEntity<>(data, headers, HttpStatus.OK);
     }
+
+    /**
+     * 获取指定用户头像
+     */
+    @GetMapping("/avatar/{userId}")
+    @ApiOperation("获取指定用户头像")
+    public ResponseEntity<byte[]> getAvatarByUserId(@PathVariable Long userId) {
+        try {
+            byte[] data = userService.getAvatarData(userId);
+            String avatarPath = userService.getUserById(userId).getAvatarPath();
+
+            String contentType = URLConnection.guessContentTypeFromName(avatarPath);
+            if (contentType == null) {
+                contentType = MediaType.APPLICATION_OCTET_STREAM_VALUE;
+            }
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.parseMediaType(contentType));
+            headers.setContentLength(data.length);
+            return new ResponseEntity<>(data, headers, HttpStatus.OK);
+        } catch (RuntimeException ex) {
+            return new ResponseEntity<>(HttpStatus.NOT_FOUND);
+        }
+    }
 }

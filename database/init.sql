@@ -13,6 +13,12 @@ USE secure_file_manager;
 -- =====================================================
 -- 1. 用户表
 -- =====================================================
+DROP TABLE IF EXISTS t_chat_file_share;
+DROP TABLE IF EXISTS t_chat_read_cursor;
+DROP TABLE IF EXISTS t_chat_message;
+DROP TABLE IF EXISTS t_chat_session;
+DROP TABLE IF EXISTS t_friend;
+DROP TABLE IF EXISTS t_friend_request;
 DROP TABLE IF EXISTS t_file;
 DROP TABLE IF EXISTS t_user;
 CREATE TABLE t_user (
@@ -98,7 +104,131 @@ CREATE TABLE t_system_config (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系统配置表';
 
 -- =====================================================
--- 4. 初始化数据 (可选)
+-- 4. 好友申请表
+-- =====================================================
+CREATE TABLE t_friend_request (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '申请ID',
+    from_user_id BIGINT NOT NULL COMMENT '申请人ID',
+    to_user_id BIGINT NOT NULL COMMENT '接收人ID',
+    status TINYINT NOT NULL DEFAULT 0 COMMENT '状态：0-待处理 1-已通过 2-已拒绝',
+    message VARCHAR(255) COMMENT '申请留言',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '申请时间',
+    handled_at DATETIME COMMENT '处理时间',
+
+    INDEX idx_to_status (to_user_id, status, created_at),
+    INDEX idx_from_status (from_user_id, status, created_at),
+
+    FOREIGN KEY (from_user_id) REFERENCES t_user(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_user_id) REFERENCES t_user(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='好友申请表';
+
+-- =====================================================
+-- 5. 好友关系表（双向存储）
+-- =====================================================
+CREATE TABLE t_friend (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '关系ID',
+    user_id BIGINT NOT NULL COMMENT '用户ID',
+    friend_user_id BIGINT NOT NULL COMMENT '好友用户ID',
+    remark VARCHAR(100) COMMENT '好友备注（仅对user_id侧生效）',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '成为好友时间',
+
+    UNIQUE KEY uk_user_friend (user_id, friend_user_id),
+    INDEX idx_friend_user (friend_user_id),
+
+    FOREIGN KEY (user_id) REFERENCES t_user(id) ON DELETE CASCADE,
+    FOREIGN KEY (friend_user_id) REFERENCES t_user(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='好友关系表';
+
+-- =====================================================
+-- 6. 会话表（一期仅支持一对一）
+-- =====================================================
+CREATE TABLE t_chat_session (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '会话ID',
+    user_a_id BIGINT NOT NULL COMMENT '较小用户ID（应用层保证 user_a_id < user_b_id）',
+    user_b_id BIGINT NOT NULL COMMENT '较大用户ID',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    last_message_at DATETIME COMMENT '最后消息时间',
+
+    UNIQUE KEY uk_user_pair (user_a_id, user_b_id),
+    INDEX idx_updated_at (updated_at),
+
+    FOREIGN KEY (user_a_id) REFERENCES t_user(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_b_id) REFERENCES t_user(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='聊天会话表';
+
+-- =====================================================
+-- 7. 消息表
+-- =====================================================
+CREATE TABLE t_chat_message (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '消息ID',
+    session_id BIGINT NOT NULL COMMENT '会话ID',
+    sender_id BIGINT NOT NULL COMMENT '发送者ID',
+    receiver_id BIGINT NOT NULL COMMENT '接收者ID',
+    client_msg_id VARCHAR(64) NOT NULL COMMENT '客户端幂等消息ID',
+    message_type VARCHAR(20) NOT NULL DEFAULT 'text' COMMENT '消息类型：text/file',
+    content_ciphertext LONGTEXT COMMENT '文本消息密文（Base64）',
+    content_iv VARCHAR(64) COMMENT '文本消息IV（Hex）',
+    content_auth_tag VARCHAR(64) COMMENT '文本消息GCM认证标签（Hex）',
+    file_id BIGINT COMMENT '文件消息关联文件ID',
+    sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间',
+    read_at DATETIME COMMENT '已读时间',
+    is_read TINYINT NOT NULL DEFAULT 0 COMMENT '是否已读：0-未读 1-已读',
+
+    UNIQUE KEY uk_session_client_msg (session_id, client_msg_id),
+    INDEX idx_session_message (session_id, id),
+    INDEX idx_receiver_unread (receiver_id, is_read, id),
+    INDEX idx_sender_sent (sender_id, sent_at),
+
+    FOREIGN KEY (session_id) REFERENCES t_chat_session(id) ON DELETE CASCADE,
+    FOREIGN KEY (sender_id) REFERENCES t_user(id) ON DELETE CASCADE,
+    FOREIGN KEY (receiver_id) REFERENCES t_user(id) ON DELETE CASCADE,
+    FOREIGN KEY (file_id) REFERENCES t_file(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='聊天消息表';
+
+-- =====================================================
+-- 8. 已读游标表
+-- =====================================================
+CREATE TABLE t_chat_read_cursor (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '游标ID',
+    session_id BIGINT NOT NULL COMMENT '会话ID',
+    user_id BIGINT NOT NULL COMMENT '用户ID',
+    last_read_message_id BIGINT COMMENT '最后已读消息ID',
+    last_read_at DATETIME COMMENT '最后已读时间',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE KEY uk_session_user (session_id, user_id),
+    INDEX idx_user_updated (user_id, updated_at),
+
+    FOREIGN KEY (session_id) REFERENCES t_chat_session(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES t_user(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话已读游标表';
+
+-- =====================================================
+-- 9. 聊天文件分享授权表
+-- =====================================================
+CREATE TABLE t_chat_file_share (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '分享授权ID',
+    message_id BIGINT NOT NULL COMMENT '关联消息ID',
+    file_id BIGINT NOT NULL COMMENT '关联文件ID',
+    owner_user_id BIGINT NOT NULL COMMENT '文件所有者ID（发送者）',
+    receiver_user_id BIGINT NOT NULL COMMENT '接收者ID',
+    expires_at DATETIME COMMENT '过期时间，NULL表示永不过期',
+    revoked TINYINT NOT NULL DEFAULT 0 COMMENT '是否撤销：0-有效 1-已撤销',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '授权时间',
+
+    UNIQUE KEY uk_message_receiver (message_id, receiver_user_id),
+    INDEX idx_receiver_valid (receiver_user_id, revoked, expires_at),
+    INDEX idx_file_id (file_id),
+
+    FOREIGN KEY (message_id) REFERENCES t_chat_message(id) ON DELETE CASCADE,
+    FOREIGN KEY (file_id) REFERENCES t_file(id) ON DELETE CASCADE,
+    FOREIGN KEY (owner_user_id) REFERENCES t_user(id) ON DELETE CASCADE,
+    FOREIGN KEY (receiver_user_id) REFERENCES t_user(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='聊天文件分享授权表';
+
+-- =====================================================
+-- 10. 初始化数据 (可选)
 -- =====================================================
 -- 预留：如果有默认的 admin 用户插入，可以在这里执行
 -- 这里保留原有 migration_add_user_role 中的逻辑，用于在后续插入后更新角色，或者提醒

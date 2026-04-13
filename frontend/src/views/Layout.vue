@@ -25,6 +25,10 @@
           <el-icon><Delete /></el-icon>
           <span>回收站</span>
         </el-menu-item>
+        <el-menu-item index="/chat">
+          <el-icon><ChatLineRound /></el-icon>
+          <span>聊天</span>
+        </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Setting /></el-icon>
           <span>个人设置</span>
@@ -73,7 +77,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Document, Setting, Lock, Delete, Files, UserFilled, CaretBottom } from '@element-plus/icons-vue';
+import { Document, Setting, Lock, Delete, Files, UserFilled, CaretBottom, ChatLineRound } from '@element-plus/icons-vue';
 import { useUser } from '../composables/useUser.js';
 
 const router = useRouter();
@@ -93,6 +97,8 @@ const pageTitle = computed(() => {
       return '文件列表';
     case '/recycle':
       return '回收站';
+    case '/chat':
+      return '好友聊天';
     case '/settings':
       return '个人设置';
     case '/security':

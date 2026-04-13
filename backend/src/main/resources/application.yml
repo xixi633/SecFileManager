@@ -136,3 +136,7 @@ secure-file:
     resend-seconds: 60
   reset-mail:
     from: "忘记密码服务 <2284641493@qq.com>"
+
+  chat:
+    file-share-expire-hours: 24
+    message-page-size: 20

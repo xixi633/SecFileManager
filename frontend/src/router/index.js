@@ -6,6 +6,7 @@ import UserSettings from "../views/UserSettings.vue";
 import SecurityInfo from "../views/SecurityInfo.vue";
 import AdminPanel from "../views/AdminPanel.vue";
 import RecycleBin from "../views/RecycleBin.vue";
+import Chat from "../views/Chat.vue";
 
 const routes = [
   { path: "/", redirect: "/files" },
@@ -18,7 +19,8 @@ const routes = [
       { path: "files", name: "Files", component: FileList },
       { path: "recycle", name: "Recycle", component: RecycleBin },
       { path: "settings", name: "Settings", component: UserSettings },
-      { path: "security", name: "Security", component: SecurityInfo }
+      { path: "security", name: "Security", component: SecurityInfo },
+      { path: "chat", name: "Chat", component: Chat }
     ]
   }
 ];

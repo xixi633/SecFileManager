@@ -41,6 +41,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         "/user/password/reset/request",
                         "/user/password/reset/verify",
                         "/user/password/reset/confirm",
+                        "/chat/ws",
+                        "/chat/ws/**",
                         "/doc.html",
                         "/swagger-resources/**",
                         "/webjars/**",
