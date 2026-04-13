@@ -113,7 +113,8 @@ secure-file:
   # 提示：kkFileView v4.0.0+ 必须使用 {base64Url}，v4.0 之前使用 {url}
   viewer:
     url-template: "{scheme}://{host}:8012/onlinePreview?url={base64Url}"
-    source-base-url: "auto"
+    # kkFileView 运行在 Docker 容器时，需使用容器可访问的后端地址，避免回源到 5173/localhost 导致 Connection refused
+    source-base-url: "http://host.docker.internal:8080/api"
 
   
   

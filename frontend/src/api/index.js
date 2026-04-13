@@ -1,5 +1,6 @@
 import axios from "axios";
 import { ElMessage } from "element-plus";
+import { addPreviewFailureNotification } from "../store/messageCenter.js";
 
 const runtimeApiBase =
   import.meta.env.VITE_API_BASE_URL ||
@@ -9,6 +10,11 @@ const api = axios.create({
   baseURL: runtimeApiBase,
   timeout: 300000, // 5分钟超时，用于大文件上传
 });
+
+const isPreviewRelatedRequest = (config) => {
+  const requestUrl = String(config?.url || '').toLowerCase();
+  return requestUrl.includes('/preview') || requestUrl.includes('/viewer');
+};
 
 api.interceptors.request.use(
   (config) => {
@@ -50,6 +56,15 @@ api.interceptors.response.use(
       }
       return Promise.reject(error);
     }
+
+    if (errorCode === 'PREVIEW_DECRYPT_FAILED' || isPreviewRelatedRequest(error?.config)) {
+      const fileHint = error?.config?.params?.path || '文件预览';
+      addPreviewFailureNotification({
+        fileName: fileHint,
+        message
+      });
+    }
+
     ElMessage.error(message);
     return Promise.reject(error);
   }

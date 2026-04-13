@@ -8,9 +8,25 @@
 
       <el-tabs v-model="activeTab" class="chat-tabs">
         <el-tab-pane label="会话" name="sessions">
-          <el-scrollbar height="calc(100vh - 230px)">
+          <div class="tab-toolbar">
+            <el-input
+              v-model="sessionKeyword"
+              size="small"
+              clearable
+              placeholder="搜索会话"
+            />
+            <el-button
+              text
+              type="primary"
+              :disabled="sessions.length === 0"
+              @click="markAllSessionAsRead"
+            >
+              全部已读
+            </el-button>
+          </div>
+          <el-scrollbar height="calc(100vh - 274px)">
             <div
-              v-for="item in sessions"
+              v-for="item in filteredSessions"
               :key="item.sessionId"
               class="session-item"
               :class="{ active: activeSessionId === item.sessionId }"
@@ -21,9 +37,28 @@
                 <div class="session-title">{{ displayNameOf(item) }}</div>
                 <div class="session-preview">{{ item.lastMessagePreview || '暂无消息' }}</div>
               </div>
-              <el-badge v-if="item.unreadCount > 0" :value="item.unreadCount" class="session-badge" />
+
+              <div class="session-actions">
+                <el-tag
+                  v-if="isSessionPinned(item.sessionId)"
+                  size="small"
+                  effect="plain"
+                  type="warning"
+                >
+                  置顶
+                </el-tag>
+                <el-button
+                  link
+                  type="primary"
+                  class="session-pin-btn"
+                  @click.stop="togglePinSession(item.sessionId)"
+                >
+                  {{ isSessionPinned(item.sessionId) ? '取消置顶' : '置顶' }}
+                </el-button>
+                <el-badge v-if="item.unreadCount > 0" :value="item.unreadCount" class="session-badge" />
+              </div>
             </div>
-            <el-empty v-if="sessions.length === 0" description="暂无会话" :image-size="90" />
+            <el-empty v-if="filteredSessions.length === 0" description="暂无会话" :image-size="90" />
           </el-scrollbar>
         </el-tab-pane>
 
@@ -46,8 +81,19 @@
         </el-tab-pane>
 
         <el-tab-pane label="申请" name="requests">
-          <el-scrollbar height="calc(100vh - 230px)">
-            <div v-for="req in incomingRequests" :key="req.requestId" class="request-item">
+          <div class="tab-toolbar">
+            <div class="request-summary">待处理 {{ friendRequestCount }} 条</div>
+            <el-button
+              text
+              type="primary"
+              :disabled="processedRequestCount <= 0"
+              @click="clearProcessedRequests"
+            >
+              清理已处理记录
+            </el-button>
+          </div>
+          <el-scrollbar height="calc(100vh - 274px)">
+            <div v-for="req in visibleIncomingRequests" :key="req.requestId" class="request-item">
               <el-avatar :size="34" :src="avatarByUserId(req.fromUser?.userId)" />
               <div class="request-text">
                 <div class="request-name">{{ displayNameOf(req.fromUser) }}</div>
@@ -61,7 +107,7 @@
                 {{ req.status === 1 ? '已同意' : '已拒绝' }}
               </div>
             </div>
-            <el-empty v-if="incomingRequests.length === 0" description="暂无申请" :image-size="90" />
+            <el-empty v-if="visibleIncomingRequests.length === 0" description="暂无申请" :image-size="90" />
           </el-scrollbar>
         </el-tab-pane>
       </el-tabs>
@@ -89,7 +135,17 @@
                 <div class="file-card">
                   <div class="file-title">{{ msg.fileName || `文件 #${msg.fileId}` }}</div>
                   <div class="file-size">{{ formatFileSize(msg.fileSize) }}</div>
-                  <el-button size="small" @click="downloadFile(msg)">下载</el-button>
+                  <div class="file-actions">
+                    <el-button size="small" @click="downloadFile(msg)">下载</el-button>
+                    <el-button
+                      size="small"
+                      type="primary"
+                      :loading="isSavingToLibrary(msg.id)"
+                      @click="saveChatFileToLibrary(msg)"
+                    >
+                      保存到文件列表
+                    </el-button>
+                  </div>
                 </div>
               </template>
               <template v-else>
@@ -190,7 +246,8 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api/index.js';
 import { useUser } from '../composables/useUser.js';
@@ -211,9 +268,18 @@ import {
   sendTextMessage,
   updateFriendRemark
 } from '../api/chat.js';
-import { fetchFileList, uploadFile } from '../api/file.js';
+import { fetchFileList } from '../api/file.js';
+import { createFileUploadTask, enqueueUploadTasks, validateUploadFile } from '../store/uploadQueue.js';
+import { setChatUnreadCount, setFriendRequestCount } from '../store/messageCenter.js';
+
+const PINNED_SESSION_STORAGE_KEY = 'chatPinnedSessionIds_v1';
+const HIDDEN_REQUEST_STORAGE_KEY = 'chatHiddenRequestIds_v1';
 
 const activeTab = ref('sessions');
+const route = useRoute();
+const sessionKeyword = ref('');
+const pinnedSessionIds = ref([]);
+const hiddenRequestIds = ref([]);
 const friends = ref([]);
 const sessions = ref([]);
 const incomingRequests = ref([]);
@@ -241,9 +307,46 @@ const libraryPagination = ref({ page: 1, size: 8, total: 0 });
 const wsRef = ref(null);
 const wsConnected = ref(false);
 let wsReconnectTimer = null;
+const savingToLibraryMap = ref({});
 
 const { avatarUrl } = useUser('user');
 const avatarVersion = String(Date.now());
+const pinnedSessionIdSet = computed(() => new Set(pinnedSessionIds.value));
+const processedRequestCount = computed(() => incomingRequests.value.filter((item) => Number(item?.status) !== 0).length);
+
+const visibleIncomingRequests = computed(() => {
+  const hiddenSet = new Set(hiddenRequestIds.value);
+  return incomingRequests.value.filter((item) => Number(item?.status) === 0 || !hiddenSet.has(String(item?.requestId || '')));
+});
+
+const sortedSessions = computed(() => {
+  const rows = [...sessions.value];
+  rows.sort((a, b) => {
+    const aPinned = pinnedSessionIdSet.value.has(String(a?.sessionId || ''));
+    const bPinned = pinnedSessionIdSet.value.has(String(b?.sessionId || ''));
+    if (aPinned !== bPinned) {
+      return aPinned ? -1 : 1;
+    }
+    return getSessionSortTimestamp(b) - getSessionSortTimestamp(a);
+  });
+  return rows;
+});
+
+const filteredSessions = computed(() => {
+  const keyword = sessionKeyword.value.trim().toLowerCase();
+  if (!keyword) return sortedSessions.value;
+
+  return sortedSessions.value.filter((item) => {
+    const text = [
+      displayNameOf(item),
+      item?.friendUsername || '',
+      item?.lastMessagePreview || ''
+    ]
+      .join(' ')
+      .toLowerCase();
+    return text.includes(keyword);
+  });
+});
 
 const activeFriendName = computed(() => displayNameOf(activeFriend.value));
 const activeFriendAvatar = computed(() => {
@@ -254,9 +357,19 @@ const activeFriendAvatar = computed(() => {
 });
 
 onMounted(async () => {
+  loadPinnedSessionIds();
+  loadHiddenRequestIds();
   await Promise.all([loadFriends(), loadIncomingRequests(), loadSessions()]);
   connectWs();
 });
+
+watch(
+  () => route.query.tab,
+  () => {
+    syncActiveTabByRoute();
+  },
+  { immediate: true }
+);
 
 onBeforeUnmount(() => {
   if (wsReconnectTimer) {
@@ -297,6 +410,81 @@ async function loadFriends() {
 async function loadIncomingRequests() {
   const res = await listIncomingFriendRequests();
   incomingRequests.value = res?.data?.data || [];
+  const pendingCount = incomingRequests.value.filter((item) => Number(item?.status) === 0).length;
+  setFriendRequestCount(pendingCount);
+  pruneHiddenRequestIds();
+}
+
+function getSessionSortTimestamp(session) {
+  const rawTime =
+    session?.lastMessageTime ||
+    session?.lastMessageAt ||
+    session?.updateTime ||
+    session?.updatedAt;
+  if (rawTime) {
+    const ts = new Date(rawTime).getTime();
+    if (!Number.isNaN(ts)) return ts;
+  }
+  const fallback = Number(session?.sessionId || 0);
+  return Number.isFinite(fallback) ? fallback : 0;
+}
+
+function loadPinnedSessionIds() {
+  try {
+    const raw = localStorage.getItem(PINNED_SESSION_STORAGE_KEY);
+    const parsed = JSON.parse(raw || '[]');
+    pinnedSessionIds.value = Array.isArray(parsed) ? parsed.map((id) => String(id)) : [];
+  } catch (_) {
+    pinnedSessionIds.value = [];
+  }
+}
+
+function savePinnedSessionIds() {
+  localStorage.setItem(PINNED_SESSION_STORAGE_KEY, JSON.stringify(pinnedSessionIds.value));
+}
+
+function loadHiddenRequestIds() {
+  try {
+    const raw = localStorage.getItem(HIDDEN_REQUEST_STORAGE_KEY);
+    const parsed = JSON.parse(raw || '[]');
+    hiddenRequestIds.value = Array.isArray(parsed) ? parsed.map((id) => String(id)) : [];
+  } catch (_) {
+    hiddenRequestIds.value = [];
+  }
+}
+
+function saveHiddenRequestIds() {
+  localStorage.setItem(HIDDEN_REQUEST_STORAGE_KEY, JSON.stringify(hiddenRequestIds.value));
+}
+
+function pruneHiddenRequestIds() {
+  const currentIds = new Set(incomingRequests.value.map((item) => String(item?.requestId || '')));
+  hiddenRequestIds.value = hiddenRequestIds.value.filter((id) => currentIds.has(id));
+  saveHiddenRequestIds();
+}
+
+function isSessionPinned(sessionId) {
+  return pinnedSessionIdSet.value.has(String(sessionId));
+}
+
+function togglePinSession(sessionId) {
+  const targetId = String(sessionId || '');
+  if (!targetId) return;
+  if (pinnedSessionIdSet.value.has(targetId)) {
+    pinnedSessionIds.value = pinnedSessionIds.value.filter((id) => id !== targetId);
+    ElMessage.success('已取消置顶');
+  } else {
+    pinnedSessionIds.value = [targetId, ...pinnedSessionIds.value.filter((id) => id !== targetId)];
+    ElMessage.success('会话已置顶');
+  }
+  savePinnedSessionIds();
+}
+
+function syncActiveTabByRoute() {
+  const tab = String(route.query.tab || '');
+  if (tab === 'sessions' || tab === 'friends' || tab === 'requests') {
+    activeTab.value = tab;
+  }
 }
 
 async function loadSessions() {
@@ -308,6 +496,45 @@ async function loadSessions() {
       activeFriend.value = current;
     }
   }
+}
+
+async function markAllSessionAsRead() {
+  const unreadSessions = sessions.value.filter((item) => Number(item?.unreadCount || 0) > 0);
+  if (unreadSessions.length === 0) {
+    ElMessage.info('当前没有未读会话');
+    return;
+  }
+
+  for (const item of unreadSessions) {
+    try {
+      const res = await listMessages(item.sessionId, 1, 1);
+      const latest = res?.data?.data?.records?.[0];
+      if (latest?.id) {
+        await markMessagesRead({ sessionId: item.sessionId, messageId: latest.id });
+      }
+    } catch (_) {
+      // 单会话失败不影响其他会话已读
+    }
+  }
+
+  await loadSessions();
+  setChatUnreadCount(0);
+  ElMessage.success('已将会话标记为已读');
+}
+
+function clearProcessedRequests() {
+  const processedIds = incomingRequests.value
+    .filter((item) => Number(item?.status) !== 0)
+    .map((item) => String(item?.requestId || ''));
+
+  if (processedIds.length === 0) {
+    ElMessage.info('没有可清理的申请记录');
+    return;
+  }
+
+  hiddenRequestIds.value = Array.from(new Set([...hiddenRequestIds.value, ...processedIds]));
+  saveHiddenRequestIds();
+  ElMessage.success(`已清理 ${processedIds.length} 条申请记录`);
 }
 
 async function openChatByFriend(friend) {
@@ -386,23 +613,38 @@ async function onFilePicked(event) {
   if (!file) return;
 
   try {
-    const formData = new FormData();
-    formData.append('file', file);
-    const uploadRes = await uploadFile(formData, 'chat-file', undefined, 0);
-    const fileId = uploadRes?.data?.data;
-    if (!fileId) {
-      throw new Error('上传失败');
+    if (!validateUploadFile(file)) {
+      return;
     }
 
-    await sendFileMessage({
-      sessionId: activeSessionId.value,
-      fileId,
-      clientMsgId: createClientMsgId('upload-file')
+    const targetSessionId = activeSessionId.value;
+    if (!targetSessionId) {
+      ElMessage.warning('请先选择会话');
+      return;
+    }
+    const task = createFileUploadTask(file, 'chat-file', {
+      successMessage: '',
+      onUploaded: async ({ fileId }) => {
+        if (!fileId) {
+          throw new Error('上传结果缺少文件ID');
+        }
+
+        await sendFileMessage({
+          sessionId: targetSessionId,
+          fileId,
+          clientMsgId: createClientMsgId('upload-file')
+        });
+
+        if (activeSessionId.value === targetSessionId) {
+          await loadMessagesForActiveSession();
+        }
+        await loadSessions();
+        ElMessage.success('文件已发送');
+      }
     });
 
-    ElMessage.success('文件已发送');
-    await loadMessagesForActiveSession();
-    await loadSessions();
+    enqueueUploadTasks([task]);
+    ElMessage.success(`已加入上传列表: ${file.name}`);
   } finally {
     event.target.value = '';
   }
@@ -473,6 +715,43 @@ async function downloadFile(msg) {
   link.click();
   document.body.removeChild(link);
   window.URL.revokeObjectURL(url);
+}
+
+function isSavingToLibrary(messageId) {
+  if (!messageId) return false;
+  return !!savingToLibraryMap.value[String(messageId)];
+}
+
+async function saveChatFileToLibrary(msg) {
+  if (!msg?.id) return;
+  const key = String(msg.id);
+  if (savingToLibraryMap.value[key]) {
+    return;
+  }
+
+  savingToLibraryMap.value[key] = true;
+  try {
+    const response = await downloadChatFile(msg.id);
+    const filename =
+      extractFilename(response.headers?.['content-disposition']) || msg.fileName || `chat-file-${msg.fileId || msg.id}`;
+    const blob = new Blob([response.data], { type: response.data?.type || 'application/octet-stream' });
+    const file = new File([blob], filename, {
+      type: blob.type || 'application/octet-stream',
+      lastModified: Date.now()
+    });
+
+    if (!validateUploadFile(file)) {
+      return;
+    }
+
+    const task = createFileUploadTask(file, '聊天文件保存', {
+      successMessage: `${filename} 已保存到文件列表`
+    });
+    enqueueUploadTasks([task]);
+    ElMessage.success(`已加入上传列表: ${filename}`);
+  } finally {
+    delete savingToLibraryMap.value[key];
+  }
 }
 
 async function acceptRequest(requestId) {
@@ -684,6 +963,20 @@ function extractFilename(contentDisposition) {
   padding: 0 12px;
 }
 
+.tab-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  margin-bottom: 8px;
+}
+
+.request-summary {
+  font-size: 12px;
+  color: #7a8599;
+}
+
 .session-item,
 .friend-item,
 .request-item {
@@ -715,6 +1008,16 @@ function extractFilename(contentDisposition) {
 .request-text {
   flex: 1;
   min-width: 0;
+}
+
+.session-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-pin-btn {
+  padding: 0;
 }
 
 .session-title,
@@ -838,6 +1141,12 @@ function extractFilename(contentDisposition) {
   margin: 4px 0 8px;
   font-size: 12px;
   color: #7f8a9b;
+}
+
+.file-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .chat-input-bar {

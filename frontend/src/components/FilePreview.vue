@@ -301,6 +301,7 @@ import * as monaco from 'monaco-editor';
 import JSZip from 'jszip';
 import api from '../api/index.js';
 import { fetchPreviewConfig, fetchViewerUrl, fetchFolderViewerUrl } from '../api/file.js';
+import { addPreviewFailureNotification } from '../store/messageCenter.js';
 
 const PREVIEW_MODE_STORAGE_KEY = 'previewModePreference';
 
@@ -413,6 +414,14 @@ const getPreviewUrl = (file) => {
 
 const getFilename = (file) => String(file?.originalFilename || '');
 
+const reportPreviewFailure = (message, file = props.file) => {
+  if (!message) return;
+  addPreviewFailureNotification({
+    fileName: getFilename(file) || '文件预览',
+    message
+  });
+};
+
 const getExtension = (file) => {
   const filename = getFilename(file).toLowerCase();
   const idx = filename.lastIndexOf('.');
@@ -506,6 +515,7 @@ const isLargeFile = (file) => (file?.fileSize || 0) > previewConfig.value.smallF
 
 const onMediaLoadError = () => {
   previewError.value = '媒体文件加载失败，请检查网络后重试或下载查看。';
+  reportPreviewFailure(previewError.value);
 };
 
 const loadPreviewConfig = async () => {
@@ -609,24 +619,28 @@ const loadPreview = async (file) => {
 
       if (isOverKkOnlyLimit(file)) {
         previewError.value = '当前文件超过 2GB，仅支持 kkFileView 预览，但未获取到有效查看器地址。';
+        reportPreviewFailure(previewError.value, file);
         return;
       }
 
       // 在自动模式下，kkFileView 不可用时降级回原生预览。
       if (previewMode.value !== 'auto') {
         previewError.value = 'kkFileView 地址获取失败，请稍后重试或切换为原生预览。';
+        reportPreviewFailure(previewError.value, file);
         return;
       }
     }
 
     if (isOverKkOnlyLimit(file)) {
       previewError.value = '超过 2GB 的文件仅支持 kkFileView 预览。';
+      reportPreviewFailure(previewError.value, file);
       return;
     }
 
     // 降级为原生基础预览
     if (isLegacyWordFile(file) || isLegacyPptFile(file) || (!isZipFile(file) && isArchiveFile(file))) {
       previewError.value = '当前格式无法使用基础原生预览。如 kkFileView 无法使用，请下载到本地查看。';
+      reportPreviewFailure(previewError.value, file);
       return;
     }
 
@@ -645,6 +659,7 @@ const loadPreview = async (file) => {
 
     if (large && isZipFile(file)) {
       previewError.value = 'ZIP 文件较大，暂不支持原生基础预览，请下载到本地查看。';
+      reportPreviewFailure(previewError.value, file);
       return;
     }
 
@@ -689,6 +704,7 @@ const loadPreview = async (file) => {
     }
   } catch (e) {
     previewError.value = e?.response?.data?.message || e?.message || '预览加载失败，请重试或下载查看。';
+    reportPreviewFailure(previewError.value, file);
   }
 };
 
@@ -742,6 +758,7 @@ const loadPartialTextPreview = async (file, append = false) => {
     }
   } catch (e) {
     previewError.value = e?.message || '文本预览加载失败，请尝试下载查看。';
+    reportPreviewFailure(previewError.value, file);
     textContent.value = '预览加载失败，请尝试下载查看。';
     partialPreviewDone.value = true;
   }

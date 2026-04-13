@@ -27,7 +27,9 @@
         </el-menu-item>
         <el-menu-item index="/chat">
           <el-icon><ChatLineRound /></el-icon>
-          <span>聊天</span>
+          <el-badge :is-dot="chatUnreadCount > 0" :hidden="chatUnreadCount <= 0" class="chat-menu-badge">
+            <span>聊天</span>
+          </el-badge>
         </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Setting /></el-icon>
@@ -47,6 +49,18 @@
           <h2 class="page-title">{{ pageTitle }}</h2>
         </div>
         <div class="navbar-right">
+          <el-badge
+            :value="totalUnreadNotificationCount"
+            :hidden="totalUnreadNotificationCount <= 0"
+            :max="99"
+            class="message-center-badge"
+          >
+            <el-button class="message-center-btn" text @click="openMessageCenter">
+              <el-icon :size="18"><Bell /></el-icon>
+              <span>消息中心</span>
+            </el-button>
+          </el-badge>
+
           <el-dropdown trigger="click" @command="handleCommand">
             <div class="avatar-wrapper">
               <el-avatar :size="32" class="user-avatar" :src="avatarUrl" :icon="UserFilled" :style="{ backgroundColor: '#409EFF' }" />
@@ -71,25 +85,307 @@
         </router-view>
       </el-main>
     </el-container>
+
+    <el-drawer v-model="messageCenterVisible" title="消息中心" size="460px">
+      <div class="message-center-summary">
+        <el-card shadow="never" class="message-center-card">
+          <div class="message-center-card-row">
+            <span class="message-center-card-title">聊天未读</span>
+            <el-tag type="danger" size="small">{{ chatUnreadCount }}</el-tag>
+          </div>
+          <div class="message-center-card-desc">未读聊天消息总数</div>
+          <el-button type="primary" link @click="openRoute({ path: '/chat', query: { tab: 'sessions' } })">去聊天</el-button>
+        </el-card>
+
+        <el-card shadow="never" class="message-center-card">
+          <div class="message-center-card-row">
+            <span class="message-center-card-title">好友申请</span>
+            <el-tag type="warning" size="small">{{ friendRequestCount }}</el-tag>
+          </div>
+          <div class="message-center-card-desc">待处理的好友申请</div>
+          <el-button type="primary" link @click="openRoute({ path: '/chat', query: { tab: 'requests' } })">去处理</el-button>
+        </el-card>
+      </div>
+
+      <div class="system-message-header">
+        <span>系统通知</span>
+        <div class="system-message-actions">
+          <el-button text type="primary" :disabled="totalUnreadNotificationCount <= 0" @click="markAllCenterRead">
+            一键已读
+          </el-button>
+          <el-button text type="primary" @click="clearReadAndHideBadge">清理已读</el-button>
+        </div>
+      </div>
+
+      <el-empty v-if="sortedSystemNotifications.length === 0" description="暂无系统通知" />
+
+      <div v-else class="system-message-list">
+        <div
+          v-for="item in sortedSystemNotifications"
+          :key="item.id"
+          class="system-message-item"
+          :class="{ 'is-unread': !item.read }"
+        >
+          <div class="system-message-meta">
+            <el-tag size="small" :type="getSystemTypeTag(item.type)">
+              {{ getSystemTypeText(item.type) }}
+            </el-tag>
+            <span class="system-message-time">{{ formatNotificationTime(item.timestamp) }}</span>
+          </div>
+          <div class="system-message-title">{{ item.title }}</div>
+          <div class="system-message-content">{{ item.message }}</div>
+          <div class="system-message-item-actions">
+            <el-button v-if="item.route" text type="primary" @click="handleSystemNotificationClick(item)">查看</el-button>
+            <el-button text @click="markSystemNotificationRead(item.id)">标记已读</el-button>
+          </div>
+        </div>
+      </div>
+    </el-drawer>
   </el-container>
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Document, Setting, Lock, Delete, Files, UserFilled, CaretBottom, ChatLineRound } from '@element-plus/icons-vue';
+import { Document, Setting, Lock, Delete, Files, UserFilled, CaretBottom, ChatLineRound, Bell } from '@element-plus/icons-vue';
 import { useUser } from '../composables/useUser.js';
+import api from '../api/index.js';
+import { listIncomingFriendRequests, unreadCount } from '../api/chat.js';
+import {
+  chatUnreadCount,
+  friendRequestCount,
+  systemNotifications,
+  unreadSystemNotificationCount,
+  totalUnreadNotificationCount,
+  setChatUnreadCount,
+  setFriendRequestCount,
+  addSystemNotification,
+  markSystemNotificationRead,
+  markAllSystemNotificationsRead,
+  clearReadSystemNotifications
+} from '../store/messageCenter.js';
 
 const router = useRouter();
 const route = useRoute();
 const currentRoute = ref(route.path);
+const messageCenterVisible = ref(false);
+const chatWsRef = ref(null);
+const chatCountInitialized = ref(false);
+const friendRequestCountInitialized = ref(false);
+let chatWsReconnectTimer = null;
+let messageCenterRefreshTimer = null;
 
 const { displayName, avatarUrl, logout } = useUser('user');
+
+const sortedSystemNotifications = computed(() => {
+  return [...systemNotifications.value].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+});
 
 // 监听路由变化
 watch(() => route.path, (newPath) => {
   currentRoute.value = newPath;
+  refreshMessageCenterSummary();
+  if (newPath === '/chat') {
+    window.setTimeout(() => {
+      refreshMessageCenterSummary();
+    }, 800);
+  }
 });
+
+onMounted(() => {
+  refreshMessageCenterSummary();
+  connectChatNotifyWs();
+  messageCenterRefreshTimer = window.setInterval(() => {
+    refreshMessageCenterSummary();
+  }, 30000);
+});
+
+onBeforeUnmount(() => {
+  if (messageCenterRefreshTimer) {
+    window.clearInterval(messageCenterRefreshTimer);
+    messageCenterRefreshTimer = null;
+  }
+  if (chatWsReconnectTimer) {
+    window.clearTimeout(chatWsReconnectTimer);
+    chatWsReconnectTimer = null;
+  }
+  if (chatWsRef.value) {
+    chatWsRef.value.close();
+    chatWsRef.value = null;
+  }
+});
+
+function buildApiBaseUrl() {
+  let base = (api.defaults.baseURL || '/api').replace(/\/$/, '');
+  if (base.startsWith('/')) {
+    base = `${window.location.protocol}//${window.location.host}${base}`;
+  }
+  return base;
+}
+
+async function refreshChatUnread() {
+  const token = localStorage.getItem('token');
+  if (!token) {
+    setChatUnreadCount(0);
+    chatCountInitialized.value = false;
+    return;
+  }
+  try {
+    const res = await unreadCount();
+    const prevCount = chatUnreadCount.value;
+    const nextCount = Number(res?.data?.data || 0);
+    setChatUnreadCount(nextCount);
+
+    if (chatCountInitialized.value && nextCount > prevCount) {
+      addSystemNotification({
+        type: 'chat-unread',
+        title: '聊天新消息',
+        message: `你有 ${nextCount} 条未读聊天消息`,
+        route: '/chat?tab=sessions',
+        dedupeKey: 'chat-unread'
+      });
+    }
+    chatCountInitialized.value = true;
+  } catch (_) {
+    // 忽略网络瞬时错误，避免影响主界面交互
+  }
+}
+
+function countPendingFriendRequests(rows) {
+  if (!Array.isArray(rows)) return 0;
+  return rows.filter((item) => Number(item?.status) === 0).length;
+}
+
+async function refreshFriendRequestPending() {
+  const token = localStorage.getItem('token');
+  if (!token) {
+    setFriendRequestCount(0);
+    friendRequestCountInitialized.value = false;
+    return;
+  }
+  try {
+    const res = await listIncomingFriendRequests();
+    const rows = res?.data?.data || [];
+    const prevCount = friendRequestCount.value;
+    const pendingCount = countPendingFriendRequests(rows);
+    setFriendRequestCount(pendingCount);
+
+    if (friendRequestCountInitialized.value && pendingCount > prevCount) {
+      addSystemNotification({
+        type: 'friend-request',
+        title: '收到新的好友申请',
+        message: `当前待处理好友申请 ${pendingCount} 条`,
+        route: '/chat?tab=requests',
+        dedupeKey: 'friend-request'
+      });
+    }
+    friendRequestCountInitialized.value = true;
+  } catch (_) {
+    // 忽略网络瞬时错误，避免影响主界面交互
+  }
+}
+
+async function refreshMessageCenterSummary() {
+  await Promise.all([refreshChatUnread(), refreshFriendRequestPending()]);
+}
+
+function connectChatNotifyWs() {
+  const token = localStorage.getItem('token');
+  if (!token) return;
+
+  const baseUrl = buildApiBaseUrl();
+  const wsUrl = `${baseUrl.replace(/^http/i, 'ws')}/chat/ws?token=${encodeURIComponent(token)}`;
+  const ws = new WebSocket(wsUrl);
+  chatWsRef.value = ws;
+
+  ws.onmessage = async (event) => {
+    try {
+      const payload = JSON.parse(event.data || '{}');
+      const type = payload?.type;
+      if (type === 'chat:new-message' || type === 'chat:message-sent' || type === 'chat:read-receipt') {
+        await refreshChatUnread();
+        return;
+      }
+
+      if (typeof type === 'string' && type.toLowerCase().includes('friend')) {
+        await refreshFriendRequestPending();
+      }
+    } catch (_) {
+      // 忽略无效消息
+    }
+  };
+
+  ws.onclose = () => {
+    chatWsRef.value = null;
+    if (chatWsReconnectTimer) {
+      window.clearTimeout(chatWsReconnectTimer);
+    }
+    if (!localStorage.getItem('token')) {
+      return;
+    }
+    chatWsReconnectTimer = window.setTimeout(connectChatNotifyWs, 3000);
+  };
+}
+
+function openMessageCenter() {
+  messageCenterVisible.value = true;
+  refreshMessageCenterSummary();
+}
+
+function openRoute(target) {
+  if (!target) {
+    messageCenterVisible.value = false;
+    return;
+  }
+
+  router.push(target);
+  messageCenterVisible.value = false;
+}
+
+function markAllCenterRead() {
+  markAllSystemNotificationsRead();
+  setChatUnreadCount(0);
+  setFriendRequestCount(0);
+}
+
+function clearReadAndHideBadge() {
+  clearReadSystemNotifications();
+  setChatUnreadCount(0);
+  setFriendRequestCount(0);
+}
+
+function handleSystemNotificationClick(item) {
+  if (!item) return;
+  markSystemNotificationRead(item.id);
+  openRoute(item.route);
+}
+
+function getSystemTypeText(type) {
+  if (type === 'upload-failed') return '上传失败';
+  if (type === 'preview-failed') return '预览失败';
+  if (type === 'chat-unread') return '聊天消息';
+  if (type === 'friend-request') return '好友申请';
+  return '系统通知';
+}
+
+function getSystemTypeTag(type) {
+  if (type === 'upload-failed') return 'danger';
+  if (type === 'preview-failed') return 'warning';
+  if (type === 'chat-unread') return 'primary';
+  if (type === 'friend-request') return 'warning';
+  return 'info';
+}
+
+function formatNotificationTime(timestamp) {
+  if (!timestamp) return '-';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '-';
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
 
 const pageTitle = computed(() => {
   switch (currentRoute.value) {
@@ -151,6 +447,16 @@ const handleCommand = (command) => {
   flex: 1;
 }
 
+.chat-menu-badge {
+  display: inline-flex;
+  align-items: center;
+}
+
+.chat-menu-badge :deep(.el-badge__content.is-fixed) {
+  top: 10px;
+  right: -6px;
+}
+
 /* 覆盖 Element Menu 选中样式 */
 .sidebar-menu :deep(.el-menu-item.is-active) {
   background-color: #1890ff !important;
@@ -190,6 +496,19 @@ const handleCommand = (command) => {
 .navbar-right {
   display: flex;
   align-items: center;
+  gap: 10px;
+}
+
+.message-center-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #606266;
+}
+
+.message-center-badge :deep(.el-badge__content.is-fixed) {
+  top: 6px;
+  right: 0;
 }
 
 .avatar-wrapper {
@@ -226,5 +545,103 @@ const handleCommand = (command) => {
 .fade-transform-leave-to {
   opacity: 0;
   transform: translateX(30px);
+}
+
+.message-center-summary {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.message-center-card {
+  border: 1px solid #eef0f3;
+}
+
+.message-center-card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.message-center-card-title {
+  font-size: 14px;
+  color: #303133;
+  font-weight: 600;
+}
+
+.message-center-card-desc {
+  margin-top: 6px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.system-message-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.system-message-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.system-message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: calc(100vh - 280px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.system-message-item {
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+}
+
+.system-message-item.is-unread {
+  border-left: 3px solid #409eff;
+  background: #f8fbff;
+}
+
+.system-message-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.system-message-time {
+  font-size: 12px;
+  color: #909399;
+}
+
+.system-message-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 4px;
+}
+
+.system-message-content {
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.system-message-item-actions {
+  margin-top: 6px;
 }
 </style>
