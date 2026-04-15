@@ -12,19 +12,23 @@
             clearable 
             class="filter-input"
           />
-          <el-input 
-            v-model="searchDescription" 
-            placeholder="描述" 
+          <el-input
+            v-model="searchDescription"
+            placeholder="描述"
             :prefix-icon="Document"
-            clearable 
+            clearable
             class="filter-input"
+            :disabled="!!currentFolderId"
+            :title="currentFolderId ? '文件夹内不可用' : ''"
           />
-          <el-input 
-            v-model="searchKeyword" 
-            placeholder="关键词" 
+          <el-input
+            v-model="searchKeyword"
+            placeholder="关键词"
             :prefix-icon="Monitor"
-            clearable 
+            clearable
             class="filter-input"
+            :disabled="!!currentFolderId"
+            :title="currentFolderId ? '文件夹内不可用' : ''"
           />
           <el-tooltip content="搜索" placement="top">
             <el-button type="primary" :icon="Search" circle @click="onSearch" />
@@ -420,13 +424,40 @@ const renderFolderEntries = () => {
   const items = [];
   const dirSet = new Set();
   const dirItems = new Map();
+  
+  const q = searchFileName.value ? searchFileName.value.toLowerCase() : '';
 
   folderEntries.value.forEach(entry => {
-    if (!entry.path.startsWith(prefix) || entry.path === prefix) return;
+    if (!entry.path.startsWith(prefix) || entry.path === prefix) return;        
     const relative = entry.path.substring(prefix.length);
+    
+    // 如果处于搜索模式，对当前路径下的所有级别进行扁平化匹配
+    if (q) {
+      const nameMatch = (entry.name || '').toLowerCase().includes(q);
+      const pathMatch = relative.toLowerCase().includes(q);
+      
+      if (nameMatch || pathMatch) {
+        items.push({
+          id: `${currentFolderId.value}_${entry.path}`,
+          originalFilename: entry.name,
+          fileSize: entry.size || 0,
+          fileType: entry.fileType || '',
+          uploadTime: '',
+          description: `匹配路径: ${relative}`,
+          isFolder: 0,
+          isDirectory: !!entry.directory || entry.path.endsWith('/'),
+          isFolderEntry: true,
+          parentFolderId: currentFolderId.value,
+          entryPath: entry.path
+        });
+      }
+      return;
+    }
+
+    // 普通浏览模式
     const parts = relative.split('/').filter(Boolean);
     const isDirEntry = entry.directory || relative.endsWith('/');
-     const hasChildDir = parts.length > 1;
+    const hasChildDir = parts.length > 1;
 
     if (isDirEntry || hasChildDir) {
       const dirName = parts[0];
@@ -474,23 +505,23 @@ const renderFolderEntries = () => {
     }
   });
 
-  const filteredItems = searchTypeCategory.value === 'all'
+  const finalItems = searchTypeCategory.value === 'all'
     ? items
     : items.filter((item) => getFileTypeCategory(item) === searchTypeCategory.value);
 
-  pagination.value.total = filteredItems.length;
-  if (filteredItems.length === 0) {
+  pagination.value.total = finalItems.length;
+  if (finalItems.length === 0) {
     pagination.value.page = 1;
     files.value = [];
     return;
   }
-  const totalPages = Math.ceil(filteredItems.length / pagination.value.size);
+  const totalPages = Math.ceil(finalItems.length / pagination.value.size);
   if (pagination.value.page > totalPages) {
     pagination.value.page = totalPages;
   }
   const start = (pagination.value.page - 1) * pagination.value.size;
   const end = start + pagination.value.size;
-  files.value = filteredItems.slice(start, end);
+  files.value = finalItems.slice(start, end);
 };
 
 const loadFiles = async () => {

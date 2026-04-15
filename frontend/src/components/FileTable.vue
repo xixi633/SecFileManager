@@ -2,6 +2,7 @@
   <el-table
     ref="tableRef"
     :data="files"
+    :fit="false"
     stripe
     border
     style="width: 100%"
@@ -11,7 +12,7 @@
     @selection-change="onSelectionChange"
   >
     <el-table-column v-if="enableSelection" type="selection" width="50" />
-    <el-table-column label="文件名" width="300">
+    <el-table-column label="文件名" min-width="300" class-name="flex-grow-cell">
       <template #default="scope">
         <el-popover
           trigger="hover"
@@ -92,13 +93,20 @@
       </template>
     </el-table-column>
     
-    <el-table-column prop="description" label="描述" width="250" show-overflow-tooltip>
+    <el-table-column prop="description" label="描述" min-width="250" show-overflow-tooltip>
       <template #default="scope">
         <span class="text-secondary">{{ scope.row.description || '-' }}</span>
       </template>
     </el-table-column>
     
-    <el-table-column label="操作" width="260">
+    <el-table-column
+      label="操作"
+      width="260"
+      fixed="right"
+      :resizable="false"
+      class-name="action-column-cell"
+      label-class-name="action-column-header"
+    >
       <template #default="scope">
         <div class="action-buttons">
           <template v-if="isVirtualDir(scope.row)">
@@ -141,7 +149,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
+import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue';
 import { Folder, Document, Picture, VideoCamera, Headset, DataAnalysis, View, Download, Edit, Delete } from '@element-plus/icons-vue';
 import { getFileTypeCategory, getFileTypeLabel } from '../utils/fileType.js';
 
@@ -160,7 +168,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(['selection-change']);
+const emit = defineEmits(['selection-change', 'browse', 'download', 'edit-description', 'preview', 'remove']);
 
 const onSelectionChange = (rows) => {
   emit('selection-change', rows);
@@ -195,8 +203,12 @@ const formatDateTime = (dateTimeStr) => {
 };
 
 const tableRef = ref(null);
+const NON_RESIZABLE_COLUMN_LABELS = new Set(['操作']);
+const FALLBACK_MIN_WIDTH = 50;
+const RESIZE_HANDLE_GAP = 10;
 let resizeState = null;
 let rafId = null;
+let headerMouseDownTarget = null;
 
 const getFlattenColumns = () => {
   const table = tableRef.value;
@@ -229,38 +241,164 @@ const getFlattenColumns = () => {
   }
 };
 
+const getLeafHeaderCells = () => {
+  const headerWrapper = tableRef.value?.$el?.querySelector('.el-table__header-wrapper');
+  if (!headerWrapper) return [];
+
+  const rows = Array.from(headerWrapper.querySelectorAll('thead tr'));
+  const leafRow = rows[rows.length - 1];
+  return leafRow ? Array.from(leafRow.children) : [];
+};
+
+const getColumnByHeaderCell = (th) => {
+  if (!th) return null;
+
+  const headerCells = getLeafHeaderCells();
+  const colIndex = headerCells.indexOf(th);
+  if (colIndex < 0) return null;
+
+  const flatColumns = getFlattenColumns();
+  return flatColumns[colIndex] || null;
+};
+
+const measureContentWidth = (cell) => {
+  if (!cell) return 0;
+
+  const previous = {
+    maxWidth: cell.style.maxWidth,
+    overflow: cell.style.overflow,
+    textOverflow: cell.style.textOverflow,
+    webkitLineClamp: cell.style.webkitLineClamp,
+    display: cell.style.display,
+    webkitBoxOrient: cell.style.webkitBoxOrient,
+    whiteSpace: cell.style.whiteSpace,
+  };
+
+  cell.style.maxWidth = 'none';
+  cell.style.overflow = 'visible';
+  cell.style.textOverflow = 'clip';
+  cell.style.webkitLineClamp = 'unset';
+  cell.style.display = 'inline-block';
+  cell.style.webkitBoxOrient = 'initial';
+  cell.style.whiteSpace = 'nowrap';
+
+  const width = Math.ceil(cell.scrollWidth);
+
+  Object.assign(cell.style, previous);
+  return width;
+};
+
+const getColumnMinWidth = (column, th) => {
+  const tableEl = tableRef.value?.$el;
+  if (!tableEl || !column?.id) {
+    return Math.ceil(Number(column?.minWidth || column?.width || FALLBACK_MIN_WIDTH));
+  }
+
+  const widths = [];
+  const headerCell = th?.querySelector('.cell');
+  if (headerCell) {
+    widths.push(measureContentWidth(headerCell) + 24);
+  }
+
+  const colNodes = Array.from(tableEl.querySelectorAll(`col[name="${column.id}"]`));
+  colNodes.forEach((colNode) => {
+    const table = colNode.closest('table');
+    const colIndex = Array.from(colNode.parentElement?.children || []).indexOf(colNode);
+    if (!table || colIndex < 0) return;
+
+    table.querySelectorAll('tbody tr').forEach((row) => {
+      const content = row.children[colIndex]?.querySelector('.cell');
+      if (content) {
+        widths.push(measureContentWidth(content) + 24);
+      }
+    });
+  });
+
+  return Math.max(
+    FALLBACK_MIN_WIDTH,
+    Math.ceil(Number(column.minWidth || 0)),
+    widths.length ? Math.max(...widths) : 0,
+  );
+};
+
+const isColumnResizable = (column) => {
+  if (!column) return false;
+  if (column.type === 'selection') return false;
+  if (NON_RESIZABLE_COLUMN_LABELS.has(column.label)) return false;
+  return true;
+};
+
+const syncColumnWidth = (column, width) => {
+  const el = tableRef.value?.$el;
+  if (!el || !column?.id) return;
+
+  const normalizedWidth = Math.ceil(width);
+  el.querySelectorAll(`col[name="${column.id}"]`).forEach((node) => {
+    node.setAttribute('width', String(normalizedWidth));
+  });
+};
+
+const syncTableContentWidth = () => {
+  const el = tableRef.value?.$el;
+  const table = tableRef.value;
+  if (!el || !table) return;
+
+  const columns = getFlattenColumns();
+  if (!columns.length) return;
+
+  const totalWidth = columns.reduce((sum, column) => {
+    const width = Number(column.realWidth || column.width || column.minWidth || 0);
+    return sum + width;
+  }, 0);
+
+  if (!totalWidth) return;
+
+  el.querySelectorAll('.el-table__header-wrapper table, .el-table__body-wrapper table').forEach((tableNode) => {
+    tableNode.style.width = `${Math.max(el.clientWidth, totalWidth)}px`;
+    tableNode.style.minWidth = '100%';
+  });
+
+  const headerWrapper = el.querySelector('.el-table__header-wrapper');
+  const bodyWrapper = el.querySelector('.el-table__body-wrapper');
+  if (headerWrapper) {
+    headerWrapper.scrollLeft = bodyWrapper?.scrollLeft || 0;
+  }
+};
+
 const onHeaderMouseDown = (e) => {
   const th = e.target.closest('th');
   if (!th) return;
 
-  const rect = th.getBoundingClientRect();
-  const isNearRightBorder = rect.right - e.clientX < 10;
+  const column = getColumnByHeaderCell(th);
+  if (!isColumnResizable(column)) return;
 
+  const rect = th.getBoundingClientRect();
+  const isNearRightBorder = rect.right - e.clientX <= RESIZE_HANDLE_GAP;
   if (!isNearRightBorder) return;
 
-  const headerCells = Array.from(th.parentElement.children);
+  // KEY FIX: Prevent resize cursor and drag on right border if next column is "操作"
+  const headerCells = getLeafHeaderCells();
   const colIndex = headerCells.indexOf(th);
-  const flatColumns = getFlattenColumns();
-  const column = flatColumns[colIndex];
-
-  if (!column) return;
+  if (colIndex >= 0 && colIndex + 1 < headerCells.length) {
+    const nextColumn = getColumnByHeaderCell(headerCells[colIndex + 1]);
+    if (nextColumn && nextColumn.label === '操作') return;
+  }
 
   e.stopImmediatePropagation();
   e.preventDefault();
 
-  const startWidth = column.realWidth || column.width || column.minWidth || 80;
-  const startX = e.clientX;
-  const minWidth = column.minWidth || 50;
-
-  resizeState = { column, startWidth, startX, minWidth, lastWidth: startWidth };
+  resizeState = {
+    column,
+    startWidth: Math.ceil(Number(column.realWidth || column.width || th.offsetWidth || FALLBACK_MIN_WIDTH)),
+    startX: e.clientX,
+    minWidth: getColumnMinWidth(column, th),
+  };
 
   const el = tableRef.value?.$el;
   if (el) el.classList.add('is-resizing');
 
   document.addEventListener('mousemove', onResizeMouseMove);
   document.addEventListener('mouseup', onResizeMouseUp);
-  document.addEventListener('pointermove', onResizeMouseMove);
-  document.addEventListener('pointerup', onResizeMouseUp);
   document.body.style.cursor = 'col-resize';
   document.body.style.userSelect = 'none';
 };
@@ -270,32 +408,20 @@ const onResizeMouseMove = (e) => {
   e.preventDefault();
 
   if (rafId) cancelAnimationFrame(rafId);
-
+  
+  // Real-time custom resizing WITHOUT triggering doLayout jitter
   rafId = requestAnimationFrame(() => {
     if (!resizeState) return;
 
     const delta = e.clientX - resizeState.startX;
-    const newWidth = Math.max(resizeState.minWidth, resizeState.startWidth + delta);
-    const widthDelta = newWidth - resizeState.lastWidth;
+    const nextWidth = Math.max(resizeState.minWidth, resizeState.startWidth + delta);
 
-    if (widthDelta === 0) return;
-
-    resizeState.column.width = resizeState.column.realWidth = newWidth;
-    resizeState.lastWidth = newWidth;
-
-    const el = tableRef.value?.$el;
-    if (el && resizeState.column.id) {
-      const cols = el.querySelectorAll(`col[name="${resizeState.column.id}"]`);
-      cols.forEach(col => col.setAttribute('width', String(newWidth)));
-
-      const tables = el.querySelectorAll(
-        '.el-table__header-wrapper table, .el-table__body-wrapper table'
-      );
-      tables.forEach(tbl => {
-        const current = parseInt(tbl.style.width) || 0;
-        tbl.style.width = `${current + widthDelta}px`;
-      });
-    }
+    resizeState.column.width = nextWidth;
+    resizeState.column.realWidth = nextWidth;
+    
+    // Manual sync width instead of tableRef.value.doLayout();
+    syncColumnWidth(resizeState.column, nextWidth);
+    syncTableContentWidth();
   });
 };
 
@@ -311,46 +437,108 @@ const cleanupResize = () => {
 
   document.removeEventListener('mousemove', onResizeMouseMove);
   document.removeEventListener('mouseup', onResizeMouseUp);
-  document.removeEventListener('pointermove', onResizeMouseMove);
-  document.removeEventListener('pointerup', onResizeMouseUp);
   document.body.style.cursor = '';
   document.body.style.userSelect = '';
 };
 
 const onResizeMouseUp = () => {
   try {
-    const table = tableRef.value;
-    if (table) {
-      table.doLayout?.();
-    }
+    tableRef.value?.doLayout?.();
+    syncTableContentWidth();
   } catch {}
   cleanupResize();
 };
 
+const bindHeaderResize = () => {
+  const el = tableRef.value?.$el;
+  if (!el) return;
+
+  const headerWrapper = el.querySelector('.el-table__header-wrapper');
+  if (!headerWrapper || headerMouseDownTarget === headerWrapper) return;
+
+  if (headerMouseDownTarget) {
+    headerMouseDownTarget.removeEventListener('mousedown', onHeaderMouseDown, true);
+  }
+
+  headerWrapper.addEventListener('mousedown', onHeaderMouseDown, true);
+  headerMouseDownTarget = headerWrapper;
+};
+
+// Also add mousemove listener to table header to block cursor changes when hovering over the boundary before "操作"
+const onHeaderHover = (e) => {
+  const th = e.target.closest('th');
+  if (!th) {
+    document.body.style.cursor = '';
+    return;
+  }
+  
+  const rect = th.getBoundingClientRect();
+  const isNearRightBorder = rect.right - e.clientX <= RESIZE_HANDLE_GAP;
+  if (!isNearRightBorder) {
+    return;
+  }
+  
+  const headerCells = getLeafHeaderCells();
+  const colIndex = headerCells.indexOf(th);
+  if (colIndex >= 0 && colIndex + 1 < headerCells.length) {
+    const nextColumn = getColumnByHeaderCell(headerCells[colIndex + 1]);
+    if (nextColumn && nextColumn.label === '操作') {
+      // Force default cursor to override element-plus drag cursor
+      e.stopPropagation();
+      e.target.style.cursor = 'default';
+      document.body.style.cursor = 'default';
+      return;
+    }
+  }
+};
+
+const bindHeaderHover = () => {
+  const el = tableRef.value?.$el;
+  if (!el) return;
+  const headerWrapper = el.querySelector('.el-table__header-wrapper');
+  if (headerWrapper) {
+    headerWrapper.addEventListener('mousemove', onHeaderHover, true);
+    headerWrapper.addEventListener('mouseleave', () => { document.body.style.cursor = ''; }, true);
+  }
+};
+
 onMounted(() => {
   nextTick(() => {
-    const el = tableRef.value?.$el;
-    if (!el) return;
-    const headerWrapper = el.querySelector('.el-table__header-wrapper');
-    if (headerWrapper) {
-      headerWrapper.addEventListener('mousedown', onHeaderMouseDown, true);
-    }
+    bindHeaderResize();
+    bindHeaderHover();
+    tableRef.value?.doLayout?.();
+    syncTableContentWidth();
   });
 });
 
+watch(
+  () => [props.files.length, props.enableSelection, props.showTypeColumn],
+  () => {
+    nextTick(() => {
+      tableRef.value?.doLayout?.();
+      syncTableContentWidth();
+    });
+  },
+  { deep: false }
+);
+
 onBeforeUnmount(() => {
+  if (headerMouseDownTarget) {
+    headerMouseDownTarget.removeEventListener('mousedown', onHeaderMouseDown, true);
+    headerMouseDownTarget = null;
+  }
+
+  document.removeEventListener('mousemove', onResizeMouseMove);
+  document.removeEventListener('mouseup', onResizeMouseUp);
+  if (rafId) cancelAnimationFrame(rafId);
+  
   const el = tableRef.value?.$el;
   if (el) {
     const headerWrapper = el.querySelector('.el-table__header-wrapper');
     if (headerWrapper) {
-      headerWrapper.removeEventListener('mousedown', onHeaderMouseDown, true);
+       headerWrapper.removeEventListener('mousemove', onHeaderHover, true);
     }
   }
-  document.removeEventListener('mousemove', onResizeMouseMove);
-  document.removeEventListener('mouseup', onResizeMouseUp);
-  document.removeEventListener('pointermove', onResizeMouseMove);
-  document.removeEventListener('pointerup', onResizeMouseUp);
-  if (rafId) cancelAnimationFrame(rafId);
 });
 </script>
 
@@ -365,6 +553,22 @@ onBeforeUnmount(() => {
 .custom-table :deep(.el-table__body-wrapper),
 .custom-table :deep(.el-table__header-wrapper) {
   overflow-x: auto;
+}
+
+.custom-table :deep(.el-table__header-wrapper table),
+.custom-table :deep(.el-table__body-wrapper table) {
+  width: 100% !important;
+  min-width: 100%;
+}
+
+/* Hide native element-plus resize proxy completely so our custom JS works cleanly */
+.custom-table :deep(.el-table__column-resize-proxy) {
+  display: none !important;
+}
+
+.custom-table.is-resizing :deep(.el-table__body-wrapper),
+.custom-table.is-resizing :deep(.el-table__header-wrapper) {
+  pointer-events: none;
 }
 
 .custom-table :deep(td),
@@ -391,13 +595,20 @@ onBeforeUnmount(() => {
   border-right-color: #f5f5f5 !important;
 }
 
-.custom-table :deep(.el-table__column-resize-proxy) {
-  display: none !important;
+.custom-table :deep(th.action-column-header .cell),
+.custom-table :deep(td.action-column-cell .cell) {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
-.custom-table.is-resizing :deep(.el-table__body-wrapper),
-.custom-table.is-resizing :deep(.el-table__header-wrapper) {
-  pointer-events: none;
+.custom-table :deep(td.action-column-cell) {
+  overflow: hidden;
+}
+
+.custom-table :deep(.action-column-header) {
+  background: #fafafa;
 }
 
 .file-name-cell {
@@ -457,6 +668,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
+  white-space: nowrap;
 }
 </style>
 
