@@ -19,7 +19,7 @@ public class SecureFileManagerApplication {
     public static void main(String[] args) {
         SpringApplication.run(SecureFileManagerApplication.class, args);
         System.out.println("=================================");
-        System.out.println("安全文件管理系统启动成功！");
+        System.out.println("耶耶耶！！！\n安全文件管理系统启动成功！");
         System.out.println("Swagger文档: http://localhost:8080/api/doc.html");
         System.out.println("=================================");
     }
