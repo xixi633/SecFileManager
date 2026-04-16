@@ -141,6 +141,7 @@
         </div>
       </div>
     </el-drawer>
+    <AiChat />
   </el-container>
 </template>
 
@@ -149,6 +150,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { Document, Setting, Lock, Delete, Files, UserFilled, CaretBottom, ChatLineRound, Bell } from '@element-plus/icons-vue';
 import { useUser } from '../composables/useUser.js';
+import AiChat from '../components/AiChat.vue';
 import api from '../api/index.js';
 import { listIncomingFriendRequests, listSessions } from '../api/chat.js';
 import {
