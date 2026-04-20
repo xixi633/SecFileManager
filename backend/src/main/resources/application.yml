@@ -28,7 +28,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/secure_file_manager?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
     username: root
-    password: root
+    password: 123456
 
     # Druid 连接池配置
     druid:
@@ -109,12 +109,19 @@ secure-file:
     max-range-response-size: 5242880  # 5MB（单次Range返回上限）
     chunk-size: 268435456             # 256MB
 
-  # 内置查看器配置（建议反向代理到同域的 /viewer）（目前先用的本机地址，后续需要修改）
+  # 内置查看器配置（跨环境自适应）
   # 提示：kkFileView v4.0.0+ 必须使用 {base64Url}，v4.0 之前使用 {url}
   viewer:
-    url-template: "{scheme}://{host}:8012/onlinePreview?url={base64Url}"
-    # kkFileView 运行在 Docker 容器时，需使用容器可访问的后端地址，避免回源到 5173/localhost 导致 Connection refused
-    source-base-url: "http://host.docker.internal:8080/api"
+    # kkFileView地址，默认按当前请求的 scheme/host 生成，也可通过环境变量固定为网关地址
+    url-template: "${SECURE_FILE_VIEWER_URL_TEMPLATE:{scheme}://{host}:8012/onlinePreview?url={base64Url}}"
+    # kkFileView 服务端回源地址（文档/Office等转换链路使用）
+    # 常见值：auto / http://host.docker.internal:8080/api / https://api.example.com/api
+    source-base-url: "${SECURE_FILE_VIEWER_SOURCE_BASE_URL:auto}"
+    # 浏览器直接回源地址（视频/音频等链路优先使用）
+    # 默认 auto；如前端与后端域名固定可显式配置
+    browser-source-base-url: "${SECURE_FILE_VIEWER_BROWSER_SOURCE_BASE_URL:auto}"
+    # 浏览器不可直连的主机名列表（逗号分隔），命中后自动回退到当前请求域名
+    browser-unreachable-hosts: "${SECURE_FILE_VIEWER_BROWSER_UNREACHABLE_HOSTS:host.docker.internal,docker.for.mac.host.internal,docker.for.win.host.internal}"
 
   
   

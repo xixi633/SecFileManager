@@ -11,7 +11,7 @@
       <el-alert
         v-if="file && isOverKkOnlyLimit(file)"
         title=">2GB 文件预览策略"
-        description="超过 2GB 的文件仅支持 kkFileView 预览，已自动切换为 kkFileView。"
+        description="超过 2GB 的文档/压缩类文件仅支持 kkFileView 预览；媒体文件仍走原生流式预览。"
         type="warning"
         show-icon
         :closable="false"
@@ -464,7 +464,14 @@ const isTextFile = (file) => hasExtension(file, TEXT_EXTENSIONS) || hasMimePrefi
 const isZipFile = (file) => hasExtension(file, ZIP_EXTENSIONS) || hasMimeIncludes(file, ['zip']);
 const isArchiveFile = (file) => hasExtension(file, ARCHIVE_EXTENSIONS) || hasMimeIncludes(file, ['zip', 'rar', '7z', 'tar', 'gzip', 'bzip', 'xz', 'compress']);
 
-const isOverKkOnlyLimit = (file) => (file?.fileSize || 0) > previewConfig.value.maxPreviewSize;
+const isStreamMediaFile = (file) => isImageFile(file) || isVideoFile(file) || isAudioFile(file);
+
+const isOverKkOnlyLimit = (file) => {
+  const overLimit = (file?.fileSize || 0) > previewConfig.value.maxPreviewSize;
+  if (!overLimit) return false;
+  // 媒体文件支持原生流式Range播放，不应被强制切到kkFileView。
+  return !isStreamMediaFile(file);
+};
 
 const isFolderEntryFile = (file) => !!(file?.isFolderEntry && file?.parentFolderId && file?.entryPath);
 

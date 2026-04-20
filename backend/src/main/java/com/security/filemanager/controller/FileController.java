@@ -23,13 +23,17 @@ import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 文件控制器
@@ -51,11 +55,22 @@ public class FileController {
     @Value("${secure-file.viewer.source-base-url:}")
     private String viewerSourceBaseUrl;
 
+    @Value("${secure-file.viewer.browser-source-base-url:auto}")
+    private String viewerBrowserSourceBaseUrl;
+
+    @Value("${secure-file.viewer.browser-unreachable-hosts:host.docker.internal,docker.for.mac.host.internal,docker.for.win.host.internal}")
+    private String viewerBrowserUnreachableHosts;
+
     @Value("${secure-file.jwt.header:Authorization}")
     private String tokenHeader;
 
     @Value("${secure-file.jwt.prefix:Bearer }")
     private String tokenPrefix;
+
+    private enum PreviewSourceTarget {
+        KKFILE_SERVER,
+        BROWSER_CLIENT
+    }
     
     // 文件预览缓存 - 避免重复解密（使用LRU缓存，最多缓存50个文件，总大小限制600MB）
     private static final long MAX_CACHE_SIZE_BYTES = 600L * 1024 * 1024; // 600MB
@@ -711,8 +726,13 @@ public class FileController {
         }
 
         String fileName = fileInfo.getOriginalFilename();
+        PreviewSourceTarget sourceTarget = isBrowserDirectMedia(fileInfo.getFileType(), fileName)
+                ? PreviewSourceTarget.BROWSER_CLIENT
+                : PreviewSourceTarget.KKFILE_SERVER;
         String previewSource = buildAbsoluteApiUrl(request,
-                "/file/preview/" + fileId + "?token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName));
+            "/file/preview/" + fileId + "?token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName),
+            sourceTarget);
+        log.debug("生成查看器回源地址: fileId={}, target={}, source={}", fileId, sourceTarget, previewSource);
         String viewerUrl = buildViewerUrl(previewSource, request);
         return Result.success(viewerUrl);
     }
@@ -749,8 +769,13 @@ public class FileController {
 
         String pathBase64 = java.util.Base64.getUrlEncoder().withoutPadding()
             .encodeToString(decodedPath.getBytes(StandardCharsets.UTF_8));
+        PreviewSourceTarget sourceTarget = isBrowserDirectMedia(null, fileName)
+                ? PreviewSourceTarget.BROWSER_CLIENT
+                : PreviewSourceTarget.KKFILE_SERVER;
         String previewSource = buildAbsoluteApiUrl(request,
-            "/file/folder/preview-safe/" + fileId + "/" + pathBase64 + "?token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName));
+            "/file/folder/preview-safe/" + fileId + "/" + pathBase64 + "?token=" + urlEncode(token) + "&fullfilename=" + urlEncode(fileName),
+            sourceTarget);
+        log.debug("生成文件夹查看器回源地址: fileId={}, target={}, source={}", fileId, sourceTarget, previewSource);
         String viewerUrl = buildViewerUrl(previewSource, request);
         return Result.success(viewerUrl);
     }
@@ -779,18 +804,68 @@ public class FileController {
     }
 
     private String buildAbsoluteApiUrl(HttpServletRequest request, String apiPathWithQuery) {
-        if (viewerSourceBaseUrl != null && !viewerSourceBaseUrl.trim().isEmpty()
-                && !"auto".equalsIgnoreCase(viewerSourceBaseUrl.trim())) {
-            String base = applyRequestPlaceholders(viewerSourceBaseUrl.trim(), request);
-            if (base.endsWith("/")) {
-                base = base.substring(0, base.length() - 1);
+        return buildAbsoluteApiUrl(request, apiPathWithQuery, PreviewSourceTarget.KKFILE_SERVER);
+    }
+
+    private String buildAbsoluteApiUrl(HttpServletRequest request,
+            String apiPathWithQuery,
+            PreviewSourceTarget target) {
+        String configuredBase = resolveConfiguredSourceBaseUrl(request, target);
+        if (configuredBase != null && !configuredBase.isEmpty()) {
+            return concatBaseAndApiPath(configuredBase, apiPathWithQuery);
+        }
+        return concatBaseAndApiPath(buildRequestBaseUrl(request), apiPathWithQuery);
+    }
+
+    private String resolveConfiguredSourceBaseUrl(HttpServletRequest request, PreviewSourceTarget target) {
+        String preferredConfig = target == PreviewSourceTarget.BROWSER_CLIENT
+                ? viewerBrowserSourceBaseUrl
+                : viewerSourceBaseUrl;
+        String preferredResolved = resolveConfiguredBaseUrl(preferredConfig, request);
+
+        if (target == PreviewSourceTarget.BROWSER_CLIENT) {
+            if (isBrowserReachableBaseUrl(preferredResolved)) {
+                return preferredResolved;
             }
-            if (apiPathWithQuery.startsWith("/")) {
-                return base + apiPathWithQuery;
+
+            // 浏览器链路回退到 source-base-url（用于只配置了一处地址的场景）。
+            String serverResolved = resolveConfiguredBaseUrl(viewerSourceBaseUrl, request);
+            if (isBrowserReachableBaseUrl(serverResolved)) {
+                return serverResolved;
             }
-            return base + "/" + apiPathWithQuery;
+
+            // 两者都不可用时返回 null，调用方会回退到当前请求域名。
+            return null;
         }
 
+        return preferredResolved;
+    }
+
+    private String resolveConfiguredBaseUrl(String configuredBase, HttpServletRequest request) {
+        if (configuredBase == null || configuredBase.trim().isEmpty()) {
+            return null;
+        }
+
+        String base = applyRequestPlaceholders(configuredBase.trim(), request);
+        if (base.isEmpty() || "auto".equalsIgnoreCase(base)) {
+            return null;
+        }
+
+        return normalizeBaseUrl(base);
+    }
+
+    private String normalizeBaseUrl(String base) {
+        if (base == null) {
+            return "";
+        }
+        String normalized = base.trim();
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
+    private String buildRequestBaseUrl(HttpServletRequest request) {
         String scheme = resolveRequestScheme(request);
         String host = resolveRequestHost(request);
         int port;
@@ -810,13 +885,62 @@ public class FileController {
         if (contextPath != null && !contextPath.isEmpty()) {
             base.append(contextPath);
         }
-
-        if (apiPathWithQuery.startsWith("/")) {
-            base.append(apiPathWithQuery);
-        } else {
-            base.append('/').append(apiPathWithQuery);
-        }
         return base.toString();
+    }
+
+    private String concatBaseAndApiPath(String base, String apiPathWithQuery) {
+        if (apiPathWithQuery == null || apiPathWithQuery.isEmpty()) {
+            return normalizeBaseUrl(base);
+        }
+
+        String normalizedBase = normalizeBaseUrl(base);
+        if (apiPathWithQuery.startsWith("/")) {
+            return normalizedBase + apiPathWithQuery;
+        }
+        return normalizedBase + "/" + apiPathWithQuery;
+    }
+
+    private boolean isBrowserReachableBaseUrl(String baseUrl) {
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            return false;
+        }
+
+        String host = parseHostFromAbsoluteUrl(baseUrl);
+        if (host == null || host.isEmpty()) {
+            return false;
+        }
+
+        Set<String> unreachableHostSet = new LinkedHashSet<>();
+        if (viewerBrowserUnreachableHosts != null && !viewerBrowserUnreachableHosts.trim().isEmpty()) {
+            unreachableHostSet.addAll(Arrays.asList(viewerBrowserUnreachableHosts.toLowerCase().split(",")));
+        }
+
+        String normalizedHost = host.toLowerCase();
+        for (String unreachableHost : unreachableHostSet) {
+            String candidate = unreachableHost == null ? "" : unreachableHost.trim();
+            if (!candidate.isEmpty() && candidate.equals(normalizedHost)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String parseHostFromAbsoluteUrl(String baseUrl) {
+        try {
+            URI uri = URI.create(baseUrl);
+            if (uri.getHost() != null && !uri.getHost().isEmpty()) {
+                return uri.getHost();
+            }
+        } catch (Exception ignored) {
+            // fallback to manual parser below
+        }
+
+        String value = baseUrl;
+        int schemeIndex = value.indexOf("://");
+        if (schemeIndex >= 0 && schemeIndex + 3 < value.length()) {
+            value = value.substring(schemeIndex + 3);
+        }
+        return parseHost(value);
     }
 
     private String extractRawToken(HttpServletRequest request) {
@@ -946,6 +1070,37 @@ public class FileController {
         }
 
         return null;
+    }
+
+    private boolean isBrowserDirectMedia(String contentType, String fileName) {
+        String normalizedType = contentType == null ? "" : contentType.toLowerCase();
+        if (normalizedType.startsWith("video/") || normalizedType.startsWith("audio/")) {
+            return true;
+        }
+
+        String ext = extractExtension(fileName);
+        return "mp4".equals(ext)
+                || "webm".equals(ext)
+                || "ogg".equals(ext)
+                || "mov".equals(ext)
+                || "m4v".equals(ext)
+                || "mp3".equals(ext)
+                || "wav".equals(ext)
+                || "flac".equals(ext)
+                || "aac".equals(ext)
+                || "m4a".equals(ext);
+    }
+
+    private String extractExtension(String fileName) {
+        if (fileName == null || fileName.isEmpty()) {
+            return "";
+        }
+        String normalized = fileName.toLowerCase();
+        int dotIndex = normalized.lastIndexOf('.');
+        if (dotIndex < 0 || dotIndex == normalized.length() - 1) {
+            return "";
+        }
+        return normalized.substring(dotIndex + 1);
     }
 
     private String urlEncode(String value) {
@@ -1110,6 +1265,11 @@ public class FileController {
             String rangeHeader, HttpServletResponse response) throws IOException {
         try {
             String range = rangeHeader.substring(6);
+            int commaIndex = range.indexOf(',');
+            if (commaIndex >= 0) {
+                // 多区间Range场景仅处理第一个区间，避免解析失败导致播放器卡死。
+                range = range.substring(0, commaIndex);
+            }
             String[] parts = range.split("-");
             Long rangeStart = null;
             Long rangeEnd = null;
@@ -1151,9 +1311,14 @@ public class FileController {
                 return;
             }
 
-            // 对大文件限制单次Range返回量，防止 Range: bytes=0- 导致加载整个文件到内存 OOM
-            if ((end - start + 1) > fileService.getMaxRangeResponseSize()) {
-                end = start + fileService.getMaxRangeResponseSize() - 1;
+            // 对大文件限制单次Range返回量，防止 Range: bytes=0- 导致加载整个文件到内存 OOM。
+            // 媒体文件适当放宽窗口，降低播放器首帧与缓冲等待时间。
+            long maxRangeResponseSize = fileService.getMaxRangeResponseSize();
+            if (isMediaContentType(fileInfo.getFileType())) {
+                maxRangeResponseSize = Math.max(maxRangeResponseSize, 32L * 1024 * 1024);
+            }
+            if ((end - start + 1) > maxRangeResponseSize) {
+                end = start + maxRangeResponseSize - 1;
                 if (end >= fileLength) {
                     end = fileLength - 1;
                 }
@@ -1179,6 +1344,11 @@ public class FileController {
             }
         } catch (Throwable e) {
             log.error("处理Range请求失败", e);
+            if (!response.isCommitted() && isMediaContentType(fileInfo.getFileType())) {
+                log.warn("媒体Range失败，回退完整流式输出: fileId={}", fileInfo.getId());
+                streamLargeFilePreview(fileInfo, userId, response);
+                return;
+            }
             if (!response.isCommitted()) {
                 response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
             }
@@ -1278,6 +1448,14 @@ public class FileController {
             return contentType + "; charset=UTF-8";
         }
         return contentType;
+    }
+
+    private boolean isMediaContentType(String contentType) {
+        if (contentType == null) {
+            return false;
+        }
+        String normalized = contentType.toLowerCase();
+        return normalized.startsWith("video/") || normalized.startsWith("audio/");
     }
 
 }

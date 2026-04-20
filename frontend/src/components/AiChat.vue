@@ -23,10 +23,20 @@
               <template v-else>
                 <div v-if="msg.content" class="ai-msg-text" v-html="renderMarkdown(msg.content)"></div>
                 <div v-if="msg.files && msg.files.length > 0" class="ai-file-card">
-                  <div class="ai-file-card-header">
+                  <div class="ai-file-card-header" :class="{ 'is-clickable': !!msg.locateAction }" @click="msg.locateAction && locateToFileList(msg.locateAction)">
                     <el-icon :size="14"><Folder /></el-icon>
                     <span>找到 {{ msg.total }} 个文件</span>
                     <el-tag v-if="msg.searchLabel" size="small" effect="dark" class="ai-card-type-tag">{{ msg.searchLabel }}</el-tag>
+                  </div>
+                  <div v-if="msg.locateAction" class="ai-file-card-action">
+                    <el-button
+                      size="small"
+                      type="primary"
+                      plain
+                      @click.stop="locateToFileList(msg.locateAction)"
+                    >
+                      {{ msg.locateAction.actionLabel || '在文件列表中定位' }}
+                    </el-button>
                   </div>
                   <div v-for="(file, fIdx) in msg.files" :key="fIdx" class="ai-file-item">
                     <el-icon :size="16" class="ai-file-icon" :style="{ color: getCategoryColor(file.category) }">
@@ -78,10 +88,13 @@
 
 <script setup>
 import { ref, nextTick, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
 import { ChatDotRound, Close, Monitor, User, Promotion, Folder, Document, Picture, VideoCamera, Headset, Files, Notebook, Loading } from '@element-plus/icons-vue';
 import { streamAiChat } from '../api/ai.js';
 import { fetchFileList } from '../api/file.js';
 import { getFileTypeCategory, getFileTypeLabel } from '../utils/fileType.js';
+
+const AI_FILE_LOCATE_EVENT = 'ai-file-locate';
 
 const isOpen = ref(false);
 const hasUnread = ref(false);
@@ -89,18 +102,24 @@ const inputText = ref('');
 const isSending = ref(false);
 const chatMessages = ref([]);
 const messagesRef = ref(null);
+const router = useRouter();
 
-onMounted(() => {
-  chatMessages.value.push({
-    role: 'assistant',
-    content: '你好！我是 AI 助手，可以帮你查找文件或回答问题。试试说"帮我找Java文件"吧～',
+function createMessage(role, content = '') {
+  return {
+    role,
+    content,
     files: null,
     total: 0,
     searchLabel: '',
     loading: false,
     searching: false,
-    noResult: false
-  });
+    noResult: false,
+    locateAction: null,
+  };
+}
+
+onMounted(() => {
+  chatMessages.value.push(createMessage('assistant', '你好！我是 AI 助手，可以帮你查找文件、删除文件（移入回收站）和回答文件详情问题。试试说"帮我找Java文件"或"删除报告.docx"。'));
 });
 
 function toggleChat() {
@@ -115,12 +134,14 @@ function sendMessage() {
   const text = inputText.value.trim();
   if (!text || isSending.value) return;
 
-  chatMessages.value.push({ role: 'user', content: text, files: null, total: 0, searchLabel: '', loading: false, searching: false, noResult: false });
+  chatMessages.value.push(createMessage('user', text));
   inputText.value = '';
   isSending.value = true;
 
   const assistantIdx = chatMessages.value.length;
-  chatMessages.value.push({ role: 'assistant', content: '', files: null, total: 0, searchLabel: '', loading: true, searching: false, noResult: false });
+  const assistantMessage = createMessage('assistant', '');
+  assistantMessage.loading = true;
+  chatMessages.value.push(assistantMessage);
   scrollToBottom();
 
   const messages = chatMessages.value
@@ -143,9 +164,16 @@ function sendMessage() {
         const filters = {};
         if (searchParams.keyword) filters.keyword = searchParams.keyword;
         if (searchParams.typeCategory) filters.typeCategory = searchParams.typeCategory;
+        if (searchParams.fileName) filters.fileName = searchParams.fileName;
 
         const label = searchParams.keyword || (searchParams.typeCategory ? getCategoryLabel(searchParams.typeCategory) : '');
         chatMessages.value[assistantIdx].searchLabel = label;
+        chatMessages.value[assistantIdx].locateAction = {
+          keyword: searchParams.keyword || '',
+          typeCategory: searchParams.typeCategory || '',
+          fileName: searchParams.fileName || '',
+          actionLabel: searchParams.actionLabel || '在文件列表中定位'
+        };
 
         const res = await fetchFileList(1, 20, filters);
         const data = res?.data?.data;
@@ -160,10 +188,14 @@ function sendMessage() {
           });
           chatMessages.value[assistantIdx].files = filesWithType;
           chatMessages.value[assistantIdx].total = data.total || filesWithType.length;
-          chatMessages.value[assistantIdx].content = `找到 ${data.total || filesWithType.length} 个文件`;
+          if (!chatMessages.value[assistantIdx].content) {
+            chatMessages.value[assistantIdx].content = `找到 ${data.total || filesWithType.length} 个文件`;
+          }
         } else {
           chatMessages.value[assistantIdx].noResult = true;
-          chatMessages.value[assistantIdx].content = '没有找到匹配的文件，换个关键词试试？';
+          if (!chatMessages.value[assistantIdx].content) {
+            chatMessages.value[assistantIdx].content = '没有找到匹配的文件，换个关键词试试？';
+          }
         }
       } catch (e) {
         chatMessages.value[assistantIdx].searching = false;
@@ -188,6 +220,28 @@ function sendMessage() {
       scrollToBottom();
     }
   );
+}
+
+function emitLocateEvent(payload) {
+  window.dispatchEvent(new CustomEvent(AI_FILE_LOCATE_EVENT, { detail: payload }));
+}
+
+function locateToFileList(action = {}) {
+  const payload = {
+    keyword: action.keyword || '',
+    typeCategory: action.typeCategory || '',
+    fileName: action.fileName || '',
+  };
+
+  const query = { aiLocate: '1' };
+  if (payload.keyword) query.aiKeyword = payload.keyword;
+  if (payload.typeCategory) query.aiTypeCategory = payload.typeCategory;
+  if (payload.fileName) query.aiFileName = payload.fileName;
+
+  emitLocateEvent(payload);
+  router.push({ path: '/files', query }).catch(() => {}).finally(() => {
+    window.setTimeout(() => emitLocateEvent(payload), 30);
+  });
 }
 
 function scrollToBottom() {
@@ -431,6 +485,16 @@ function getCategoryTagType(category) {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.ai-file-card-header.is-clickable {
+  cursor: pointer;
+}
+
+.ai-file-card-action {
+  padding: 8px 10px;
+  border-bottom: 1px solid #dce9ff;
+  background: #f8fbff;
 }
 
 .ai-card-type-tag {

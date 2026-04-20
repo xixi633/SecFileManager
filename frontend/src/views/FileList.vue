@@ -281,8 +281,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, computed } from "vue";
-import { useRouter } from "vue-router";
+import { ref, onMounted, onBeforeUnmount, watch, computed } from "vue";
+import { useRouter, useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Document, HomeFilled, Folder, Search, Refresh, Upload, FolderAdd, Monitor, ArrowRight } from '@element-plus/icons-vue';
 import FileTable from "../components/FileTable.vue";
@@ -333,6 +333,7 @@ import {
 
 
 const router = useRouter();
+const route = useRoute();
 const files = ref([]);
 const description = ref("");
 const fileInput = ref(null);
@@ -377,16 +378,21 @@ const displayUploadTasks = computed(() => {
   return uploadTasks.value.slice(0, 1);
 });
 const foldedTaskCount = computed(() => Math.max(0, uploadTasks.value.length - displayUploadTasks.value.length));
+const AI_FILE_LOCATE_EVENT = 'ai-file-locate';
 
 
 
 
 // 导航函数
-const navigateToRoot = () => {
+const resetToRootView = () => {
   currentPath.value = [];
   currentFolderId.value = null;
   currentFolderPath.value = '';
   folderEntries.value = [];
+};
+
+const navigateToRoot = () => {
+  resetToRootView();
   pagination.value.page = 1;
   loadFiles();
 };
@@ -551,6 +557,44 @@ const loadFiles = async () => {
   } catch (e) {
     // 错误已由拦截器提示
   }
+};
+
+const normalizeTypeCategory = (typeCategory) => {
+  const value = typeCategory || 'all';
+  return typeCategoryOptions.some(item => item.value === value) ? value : 'all';
+};
+
+const applyAiLocate = async (payload = {}, showToast = true) => {
+  resetToRootView();
+  searchFileName.value = payload.fileName ? String(payload.fileName) : '';
+  searchDescription.value = '';
+  searchKeyword.value = payload.keyword ? String(payload.keyword) : '';
+  searchTypeCategory.value = normalizeTypeCategory(payload.typeCategory);
+  pagination.value.page = 1;
+  await loadFiles();
+  if (showToast) {
+    ElMessage.success('已在文件列表定位');
+  }
+};
+
+const applyAiLocateFromRoute = async (showToast = false) => {
+  if (route.query.aiLocate !== '1') {
+    return false;
+  }
+
+  await applyAiLocate(
+    {
+      keyword: route.query.aiKeyword || '',
+      typeCategory: route.query.aiTypeCategory || '',
+      fileName: route.query.aiFileName || '',
+    },
+    showToast
+  );
+  return true;
+};
+
+const onAiLocateEvent = (event) => {
+  applyAiLocate(event?.detail || {}, true);
 };
 
 const onSearch = () => {
@@ -899,7 +943,29 @@ watch(files, () => {
   selectedRows.value = [];
 });
 
-onMounted(loadFiles);
+watch(
+  () => [route.query.aiLocate, route.query.aiKeyword, route.query.aiTypeCategory, route.query.aiFileName],
+  (current, previous) => {
+    if (current.join('|') === previous.join('|')) {
+      return;
+    }
+    if (route.query.aiLocate === '1') {
+      applyAiLocateFromRoute(false);
+    }
+  }
+);
+
+onMounted(async () => {
+  window.addEventListener(AI_FILE_LOCATE_EVENT, onAiLocateEvent);
+  const handledByRoute = await applyAiLocateFromRoute(false);
+  if (!handledByRoute) {
+    await loadFiles();
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener(AI_FILE_LOCATE_EVENT, onAiLocateEvent);
+});
 </script>
 
 <style scoped>
