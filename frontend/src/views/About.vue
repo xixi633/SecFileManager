@@ -31,7 +31,7 @@
 
       <footer class="footer">
         <div class="footer-content">
-          <p class="footer-brand">secFILEmanager</p>
+          <p class="footer-brand">SecFileManager</p>
           <p class="footer-copy">© 2026 安全文件管理系统代码演示与架构规范</p>
         </div>
       </footer>

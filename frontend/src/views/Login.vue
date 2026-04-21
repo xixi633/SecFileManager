@@ -2,23 +2,14 @@
   <div class="landing-page dark-mode">
     <!-- Background layer -->
     <div class="ocean-background liquid-metal">
-      <LightRays
-        raysOrigin="top-center"
-        raysColor="#ffffff"
-        :edgeIntensity="1.5"
-        :raysSpeed="1.0"
-        :lightSpread="2.5"
-        :rayLength="2.5"
-        :pulsating="false"
-        :fadeDistance="3.0"
-        :saturation="1.5"
-        :followMouse="true"
-        :mouseInfluence="0.1"
-        :noiseAmount="0.0"
-        :distortion="0.0"
-        className="full-screen-rays"
+      <Silk
+        :speed="3.2"
+        :scale="1"
+        color="#7B7481"
+        :noiseIntensity="1.2"
+        :rotation="0"
+        className="full-screen-silk"
       />
-      <div class="glass-overlay"></div>
     </div>
 
     <!-- Floating Navigation Bar -->
@@ -40,8 +31,11 @@
       >
         <div class="nav-container">
           <div class="nav-left">
-            <div class="logo-icon-atom"></div>
-            <span class="brand">secFILEmanager</span>
+            <svg class="new-logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+              <line x1="9" y1="14" x2="15" y2="14"></line>
+            </svg>
+            <span class="new-brand">SecFileManager</span>
           </div>
           <div class="nav-right desktop-nav">
             <div class="nav-btn" @click="openAuthModal('admin')">管理员入口</div>
@@ -218,7 +212,7 @@ import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { User, Lock, Message, UserFilled, Files, Warning, Check, ArrowDown } from '@element-plus/icons-vue';
 import { login, register, requestPasswordResetCode, verifyPasswordResetCode, confirmPasswordReset } from "../api/auth.js";
-import LightRays from '../components/LightRays.vue';
+import Silk from '../components/Silk.vue';
 import GlassSurface from '../components/GlassSurface.vue';
 import SpotlightCard from '../components/SpotlightCard.vue';
 
@@ -498,6 +492,11 @@ const onConfirmReset = async () => {
 
 <style>
 html, body {
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100%;
+  height: 100%;
+  overflow: hidden !important;
   background-color: #000000 !important;
   color: #ffffff;
 }
@@ -506,14 +505,16 @@ html, body {
   margin: 0 !important;
   padding: 0 !important;
   overflow: hidden !important;
-  height: 100vh !important;
-  width: 100vw !important;
+  height: 100% !important;
+  width: 100% !important;
 }
 </style>
 
 <style scoped>
 /* Base Dark Theme & Typography */
 .landing-page {
+  position: relative;
+  isolation: isolate;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: #f8fafc;
   overflow: hidden;
@@ -524,14 +525,15 @@ html, body {
 .ocean-background {
   position: fixed;
   inset: 0;
-  z-index: -1;
+  z-index: 0;
   background: #000000;
   overflow: hidden;
+  pointer-events: none;
 }
-.glass-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+
+.full-screen-silk {
+  z-index: 1 !important;
+  pointer-events: none;
 }
 
 /* Floating Navigation Bar */
@@ -570,22 +572,21 @@ html, body {
   gap: 10px;
 }
 
-.logo-icon-atom {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  border: 2px solid #fff;
-  position: relative;
+.new-logo-icon {
+  width: 26px;
+  height: 26px;
+  color: #ffffff;
+  transition: transform 0.3s ease;
 }
-.logo-icon-atom::before {
-  content: ''; position: absolute; top: -6px; left: -6px; right: -6px; bottom: -6px;
-  border: 1px dashed rgba(255,255,255,0.5); border-radius: 50%; transform: rotate(45deg);
+.new-logo-icon:hover {
+  transform: scale(1.05);
 }
 
-.brand {
-  font-size: 1.2rem;
+.new-brand {
+  font-size: 1.3rem;
   font-weight: 700;
-  letter-spacing: -0.5px;
+  letter-spacing: -0.2px;
+  color: #ffffff;
 }
 
 .desktop-nav {
@@ -631,6 +632,8 @@ html, body {
 .fullpage-container {
   height: 100vh;
   overflow: hidden;
+  position: relative;
+  z-index: 2;
 }
 
 /* Hero Section */
@@ -949,6 +952,9 @@ html, body {
 
 <style>
 body {
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
   background: #000000 !important;
 }
 
