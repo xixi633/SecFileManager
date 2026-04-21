@@ -2,13 +2,16 @@
   <div class="landing-page dark-mode">
     <!-- Background layer -->
     <div class="ocean-background liquid-metal">
-      <Silk
-        :speed="3.2"
-        :scale="1"
-        color="#7B7481"
-        :noiseIntensity="1.2"
-        :rotation="0"
-        className="full-screen-silk"
+      <Beams
+        :beam-width="2.7"
+        :beam-height="23"
+        :beam-number="21"
+        light-color="#a0bcce"
+        :speed="2.1"
+        :noise-intensity="1.35"
+        :scale="0.21"
+        :rotation="38"
+        className="full-screen-beams"
       />
     </div>
 
@@ -212,7 +215,7 @@ import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { User, Lock, Message, UserFilled, Files, Warning, Check, ArrowDown } from '@element-plus/icons-vue';
 import { login, register, requestPasswordResetCode, verifyPasswordResetCode, confirmPasswordReset } from "../api/auth.js";
-import Silk from '../components/Silk.vue';
+import Beams from '../components/Beams.vue';
 import GlassSurface from '../components/GlassSurface.vue';
 import SpotlightCard from '../components/SpotlightCard.vue';
 
@@ -531,7 +534,7 @@ html, body {
   pointer-events: none;
 }
 
-.full-screen-silk {
+.full-screen-beams {
   z-index: 1 !important;
   pointer-events: none;
 }
