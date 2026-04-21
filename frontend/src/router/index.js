@@ -7,10 +7,12 @@ import SecurityInfo from "../views/SecurityInfo.vue";
 import AdminPanel from "../views/AdminPanel.vue";
 import RecycleBin from "../views/RecycleBin.vue";
 import Chat from "../views/Chat.vue";
+import About from "../views/About.vue";
 
 const routes = [
   { path: "/", redirect: "/files" },
   { path: "/login", name: "Login", component: Login },
+  { path: "/about", name: "About", component: About },
   { path: "/admin", name: "Admin", component: AdminPanel },
   {
     path: "/",          
@@ -35,7 +37,7 @@ router.beforeEach((to) => {
   const role = localStorage.getItem("role");
   
   // 未登录跳转登录页
-  if (to.path !== "/login" && !token) {
+  if (to.path !== "/login" && to.path !== "/about" && !token) {
     return "/login";
   }
   
