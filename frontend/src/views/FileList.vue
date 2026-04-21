@@ -56,7 +56,7 @@
             @change="handleFileSelect"
           />
           <el-button type="primary" :icon="Upload" class="action-btn" @click="selectFiles">
-            上传文件（最多10个）
+            上传文件
           </el-button>
           
           <input
