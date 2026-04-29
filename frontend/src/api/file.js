@@ -28,6 +28,7 @@ export function uploadChunk(formData, onUploadProgress, signal) {
   return api.post("/file/chunk/upload", formData, {
     headers: { "Content-Type": "multipart/form-data" },
     onUploadProgress,
+    timeout: 600000,
     signal
   });
 }
