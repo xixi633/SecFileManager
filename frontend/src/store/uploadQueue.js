@@ -1,7 +1,6 @@
 import { ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import JSZip from 'jszip';
-import pLimit from 'p-limit';
 import {
   cancelChunkSession,
   fetchChunkSessionStatus,
@@ -19,8 +18,14 @@ import {
 } from './uploadState.js';
 import { addUploadFailureNotification } from './messageCenter.js';
 
-const LARGE_FILE_CHUNK_SIZE = 32 * 1024 * 1024;
-const CHUNK_UPLOAD_CONCURRENCY = 2;
+const LARGE_FILE_THRESHOLD = 32 * 1024 * 1024;
+const LARGE_FILE_CHUNK_SIZE = 16 * 1024 * 1024;
+const MAX_CHUNK_UPLOAD_CONCURRENCY = 8;
+const DEFAULT_CHUNK_UPLOAD_CONCURRENCY = 6;
+const LOW_CORE_CHUNK_UPLOAD_CONCURRENCY = 4;
+const MEDIUM_NETWORK_CHUNK_UPLOAD_CONCURRENCY = 4;
+const SLOW_NETWORK_CHUNK_UPLOAD_CONCURRENCY = 2;
+const PROGRESS_UPDATE_INTERVAL_MS = 80;
 
 export const uploadTasks = ref([]);
 export const uploadQueueRunning = ref(false);
@@ -187,11 +192,38 @@ const isCanceledError = (error) => error?.name === 'CanceledError'
 
 const createUploadIdentifier = (file) => `${file.name}__${file.size}__${file.lastModified}`;
 
+const resolveChunkUploadConcurrency = (totalChunks) => {
+  if (totalChunks <= 1) return 1;
+
+  const connectionType = typeof navigator !== 'undefined'
+    ? navigator.connection?.effectiveType || ''
+    : '';
+
+  let concurrency = DEFAULT_CHUNK_UPLOAD_CONCURRENCY;
+  if (connectionType === 'slow-2g' || connectionType === '2g') {
+    concurrency = SLOW_NETWORK_CHUNK_UPLOAD_CONCURRENCY;
+  } else if (connectionType === '3g') {
+    concurrency = Math.min(concurrency, MEDIUM_NETWORK_CHUNK_UPLOAD_CONCURRENCY);
+  }
+
+  const hardwareConcurrency = typeof navigator !== 'undefined'
+    ? Number(navigator.hardwareConcurrency || 0)
+    : 0;
+
+  if (hardwareConcurrency >= 16) {
+    concurrency = MAX_CHUNK_UPLOAD_CONCURRENCY;
+  } else if (hardwareConcurrency > 0 && hardwareConcurrency <= 4) {
+    concurrency = Math.min(concurrency, LOW_CORE_CHUNK_UPLOAD_CONCURRENCY);
+  }
+
+  return Math.max(1, Math.min(concurrency, MAX_CHUNK_UPLOAD_CONCURRENCY, totalChunks));
+};
+
 const runFileUploadTask = async (task) => {
   const file = task.file;
   if (!file) throw new Error('文件对象丢失，无法上传');
 
-  if (file.size <= LARGE_FILE_CHUNK_SIZE) {
+  if (file.size <= LARGE_FILE_THRESHOLD) {
     setTaskStatus(task, 'uploading', '上传中');
     const formData = new FormData();
     formData.append('file', file);
@@ -215,6 +247,7 @@ const runFileUploadTask = async (task) => {
   const identifier = createUploadIdentifier(file);
   task.identifier = identifier;
   const totalChunks = Math.ceil(file.size / LARGE_FILE_CHUNK_SIZE);
+  const chunkUploadConcurrency = resolveChunkUploadConcurrency(totalChunks);
 
   let startChunkNumber = 0;
   try {
@@ -227,55 +260,86 @@ const runFileUploadTask = async (task) => {
     startChunkNumber = 0;
   }
 
+  const resumedBytes = Math.min(file.size, startChunkNumber * LARGE_FILE_CHUNK_SIZE);
   const chunkProgress = new Map();
-  const limit = pLimit(CHUNK_UPLOAD_CONCURRENCY);
-  const chunkTasks = [];
+  let uploadedBytes = resumedBytes;
+  let lastProgressUpdateAt = 0;
 
-  setTaskStatus(task, 'uploading', `上传分片中（并发 ${CHUNK_UPLOAD_CONCURRENCY}）`);
+  const updateChunkLoadedBytes = (chunkNumber, nextLoaded, chunkSize) => {
+    const safeLoaded = Math.max(0, Math.min(nextLoaded, chunkSize));
+    const previousLoaded = chunkProgress.get(chunkNumber) || 0;
+    if (safeLoaded <= previousLoaded) {
+      return;
+    }
+    chunkProgress.set(chunkNumber, safeLoaded);
+    uploadedBytes += safeLoaded - previousLoaded;
+  };
 
-  for (let chunkNumber = startChunkNumber; chunkNumber < totalChunks; chunkNumber += 1) {
-    chunkTasks.push(limit(async () => {
-      if (task.status === 'canceled' || task.abortController?.signal.aborted) {
-        throw new Error('UPLOAD_CANCELED');
-      }
+  const syncChunkProgress = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastProgressUpdateAt < PROGRESS_UPDATE_INTERVAL_MS) {
+      return;
+    }
+    lastProgressUpdateAt = now;
+    updateTaskProgressByBytes(task, uploadedBytes, file.size, '上传分片');
+  };
 
-      const start = chunkNumber * LARGE_FILE_CHUNK_SIZE;
-      const end = Math.min(start + LARGE_FILE_CHUNK_SIZE, file.size);
-      const chunk = file.slice(start, end);
+  const uploadChunkByNumber = async (chunkNumber) => {
+    if (task.status === 'canceled' || task.abortController?.signal.aborted) {
+      throw new Error('UPLOAD_CANCELED');
+    }
 
-      const formData = new FormData();
-      formData.append('file', chunk);
-      formData.append('chunkNumber', chunkNumber);
-      formData.append('chunkSize', LARGE_FILE_CHUNK_SIZE);
-      formData.append('currentChunkSize', chunk.size);
-      formData.append('totalSize', file.size);
-      formData.append('identifier', identifier);
-      formData.append('filename', file.name);
-      formData.append('totalChunks', totalChunks);
+    const start = chunkNumber * LARGE_FILE_CHUNK_SIZE;
+    const end = Math.min(start + LARGE_FILE_CHUNK_SIZE, file.size);
+    const chunk = file.slice(start, end);
 
-      await uploadChunk(
-        formData,
-        (progress) => {
-          chunkProgress.set(chunkNumber, progress.loaded);
-          let loadedBytes = 0;
-          for (const loaded of chunkProgress.values()) {
-            loadedBytes += loaded;
-          }
-          updateTaskProgressByBytes(task, loadedBytes, file.size, '上传分片');
-        },
-        task.abortController?.signal
-      );
+    const formData = new FormData();
+    formData.append('file', chunk);
+    formData.append('chunkNumber', chunkNumber);
+    formData.append('chunkSize', LARGE_FILE_CHUNK_SIZE);
+    formData.append('currentChunkSize', chunk.size);
+    formData.append('totalSize', file.size);
+    formData.append('identifier', identifier);
+    formData.append('filename', file.name);
+    formData.append('totalChunks', totalChunks);
 
-      chunkProgress.set(chunkNumber, chunk.size);
-      let loadedBytes = 0;
-      for (const loaded of chunkProgress.values()) {
-        loadedBytes += loaded;
-      }
-      updateTaskProgressByBytes(task, loadedBytes, file.size, '上传分片');
-    }));
+    await uploadChunk(
+      formData,
+      (progress) => {
+        updateChunkLoadedBytes(chunkNumber, progress.loaded, chunk.size);
+        syncChunkProgress();
+      },
+      task.abortController?.signal
+    );
+
+    updateChunkLoadedBytes(chunkNumber, chunk.size, chunk.size);
+    syncChunkProgress(true);
+  };
+
+  const workerCount = Math.min(chunkUploadConcurrency, totalChunks - startChunkNumber);
+  let nextChunkNumber = startChunkNumber;
+  const workers = [];
+
+  setTaskStatus(task, 'uploading', `上传分片中（并发 ${chunkUploadConcurrency}）`);
+  if (resumedBytes > 0) {
+    updateTaskProgressByBytes(task, resumedBytes, file.size, '上传分片');
   }
 
-  await Promise.all(chunkTasks);
+  for (let i = 0; i < workerCount; i += 1) {
+    workers.push((async () => {
+      while (true) {
+        const chunkNumber = nextChunkNumber;
+        nextChunkNumber += 1;
+        if (chunkNumber >= totalChunks) {
+          return;
+        }
+        await uploadChunkByNumber(chunkNumber);
+      }
+    })());
+  }
+
+  await Promise.all(workers);
+  syncChunkProgress(true);
 
   setTaskStatus(task, 'finalizing', '正在提交完成');
   const mergeResponse = await mergeChunks(identifier, file.name, totalChunks, file.size);
