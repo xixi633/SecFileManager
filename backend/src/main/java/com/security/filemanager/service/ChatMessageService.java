@@ -216,6 +216,80 @@ public class ChatMessageService {
         return count == null ? 0L : count;
     }
 
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteMessagesBySessionId(Long currentUserId, Long sessionId) {
+        ChatSession session = chatSessionService.getSessionForUser(sessionId, currentUserId);
+        chatMessageMapper.delete(new LambdaQueryWrapper<ChatMessage>()
+                .eq(ChatMessage::getSessionId, session.getId()));
+        chatReadCursorMapper.delete(new LambdaQueryWrapper<ChatReadCursor>()
+                .eq(ChatReadCursor::getSessionId, session.getId()));
+    }
+
+    public List<ChatMessageResponse> searchMessages(Long currentUserId, Long sessionId, String keyword) {
+        chatSessionService.getSessionForUser(sessionId, currentUserId);
+        List<ChatMessage> allMessages = chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessage>()
+                .eq(ChatMessage::getSessionId, sessionId)
+                .orderByDesc(ChatMessage::getId));
+
+        Map<Long, FileInfo> fileInfoMap = new HashMap<>();
+        List<Long> fileIds = allMessages.stream()
+                .map(ChatMessage::getFileId)
+                .filter(id -> id != null && id > 0)
+                .distinct()
+                .collect(Collectors.toList());
+        if (!fileIds.isEmpty()) {
+            List<FileInfo> files = fileMapper.selectBatchIds(fileIds);
+            for (FileInfo file : files) {
+                fileInfoMap.put(file.getId(), file);
+            }
+        }
+
+        String lowerKeyword = keyword == null ? "" : keyword.toLowerCase();
+        List<ChatMessageResponse> results = new ArrayList<>();
+        for (ChatMessage message : allMessages) {
+            if ("file".equalsIgnoreCase(message.getMessageType())) {
+                FileInfo fileInfo = fileInfoMap.get(message.getFileId());
+                String fileName = fileInfo != null ? fileInfo.getOriginalFilename() : "";
+                if (fileName.toLowerCase().contains(lowerKeyword)) {
+                    results.add(toResponse(message, currentUserId, fileInfoMap));
+                }
+            } else {
+                String content = decryptText(message);
+                if (content.toLowerCase().contains(lowerKeyword)) {
+                    results.add(toResponse(message, currentUserId, fileInfoMap));
+                }
+            }
+        }
+        return results;
+    }
+
+    public List<ChatMessageResponse> listFileMessages(Long currentUserId, Long sessionId) {
+        chatSessionService.getSessionForUser(sessionId, currentUserId);
+        List<ChatMessage> fileMessages = chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessage>()
+                .eq(ChatMessage::getSessionId, sessionId)
+                .eq(ChatMessage::getMessageType, "file")
+                .orderByDesc(ChatMessage::getId));
+
+        Map<Long, FileInfo> fileInfoMap = new HashMap<>();
+        List<Long> fileIds = fileMessages.stream()
+                .map(ChatMessage::getFileId)
+                .filter(id -> id != null && id > 0)
+                .distinct()
+                .collect(Collectors.toList());
+        if (!fileIds.isEmpty()) {
+            List<FileInfo> files = fileMapper.selectBatchIds(fileIds);
+            for (FileInfo file : files) {
+                fileInfoMap.put(file.getId(), file);
+            }
+        }
+
+        List<ChatMessageResponse> results = new ArrayList<>();
+        for (ChatMessage message : fileMessages) {
+            results.add(toResponse(message, currentUserId, fileInfoMap));
+        }
+        return results;
+    }
+
     private ChatMessage insertMessageWithIdempotency(ChatMessage message) {
         try {
             chatMessageMapper.insert(message);

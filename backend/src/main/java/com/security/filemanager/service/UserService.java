@@ -22,12 +22,12 @@ import javax.annotation.Resource;
 import java.time.LocalDateTime;
 
 /**
- * 用户服务
+ * 鐢ㄦ埛鏈嶅姟
  * 
- * 【安全设计】
- * 1. 密码使用PBKDF2哈希 + 盐值存储
- * 2. 用户主密钥随机生成，使用系统密钥加密后存储
- * 3. 登录成功返回JWT Token
+ * 銆愬畨鍏ㄨ璁°€?
+ * 1. 瀵嗙爜浣跨敤PBKDF2鍝堝笇 + 鐩愬€煎瓨鍌?
+ * 2. 鐢ㄦ埛涓诲瘑閽ラ殢鏈虹敓鎴愶紝浣跨敤绯荤粺瀵嗛挜鍔犲瘑鍚庡瓨鍌?
+ * 3. 鐧诲綍鎴愬姛杩斿洖JWT Token
  * 
  * @author CourseDesign
  */
@@ -46,63 +46,64 @@ public class UserService {
     private FileService fileService;
     
     /**
-     * 系统主密钥（用于加密用户主密钥）
-     * 从配置文件读取，生产环境应通过环境变量注入
+     * 绯荤粺涓诲瘑閽ワ紙鐢ㄤ簬鍔犲瘑鐢ㄦ埛涓诲瘑閽ワ級
+     * 浠庨厤缃枃浠惰鍙栵紝鐢熶骇鐜搴旈€氳繃鐜鍙橀噺娉ㄥ叆
      */
     @Value("${secure-file.system-master-key}")
     private String systemMasterKey;
 
     /**
-     * 文件存储根目录
+     * 鏂囦欢瀛樺偍鏍圭洰褰?
      */
     @Value("${secure-file.storage-root}")
     private String storageRoot;
 
     private static final long MAX_AVATAR_SIZE = 2 * 1024 * 1024; // 2MB
+    private static final long MAX_CHAT_BACKGROUND_SIZE = 5 * 1024 * 1024; // 5MB
     
     /**
-     * 用户注册
+     * 鐢ㄦ埛娉ㄥ唽
      * 
-     * 【安全流程】
-     * 1. 生成密码盐值
-     * 2. 使用PBKDF2计算密码哈希
-     * 3. 生成用户主密钥（随机256位）
-     * 4. 使用系统主密钥加密用户主密钥
-     * 5. 存入数据库
+     * 銆愬畨鍏ㄦ祦绋嬨€?
+     * 1. 鐢熸垚瀵嗙爜鐩愬€?
+     * 2. 浣跨敤PBKDF2璁＄畻瀵嗙爜鍝堝笇
+     * 3. 鐢熸垚鐢ㄦ埛涓诲瘑閽ワ紙闅忔満256浣嶏級
+     * 4. 浣跨敤绯荤粺涓诲瘑閽ュ姞瀵嗙敤鎴蜂富瀵嗛挜
+     * 5. 瀛樺叆鏁版嵁搴?
      * 
-     * @param request 注册请求
+     * @param request 娉ㄥ唽璇锋眰
      */
     @Transactional(rollbackFor = Exception.class)
     public void register(RegisterRequest request) {
-        // 1. 检查用户名是否已存在（包括禁用的用户）
+        // 1. 妫€鏌ョ敤鎴峰悕鏄惁宸插瓨鍦紙鍖呮嫭绂佺敤鐨勭敤鎴凤級
         User existUser = userMapper.selectByUsernameIncludeDisabled(request.getUsername());
         if (existUser != null) {
             throw new RuntimeException("用户名已存在，请更换用户名");
         }
         
-        // 2. 生成密码盐值
+        // 2. 鐢熸垚瀵嗙爜鐩愬€?
         String passwordSalt = PasswordUtil.generateSalt();
         
-        // 3. 计算密码哈希
+        // 3. 璁＄畻瀵嗙爜鍝堝笇
         String passwordHash = PasswordUtil.hashPassword(request.getPassword(), passwordSalt);
         
-        // 4. 生成用户主密钥（用于加密该用户的所有文件密钥）
+        // 4. 鐢熸垚鐢ㄦ埛涓诲瘑閽ワ紙鐢ㄤ簬鍔犲瘑璇ョ敤鎴风殑鎵€鏈夋枃浠跺瘑閽ワ級
         String userMasterKey = AESUtil.generateKey();
         
-        // 5. 使用系统主密钥加密用户主密钥
-        // 【为什么要加密】防止数据库泄露后直接获取用户密钥
+        // 5. 浣跨敤绯荤粺涓诲瘑閽ュ姞瀵嗙敤鎴蜂富瀵嗛挜
+        // 銆愪负浠€涔堣鍔犲瘑銆戦槻姝㈡暟鎹簱娉勯湶鍚庣洿鎺ヨ幏鍙栫敤鎴峰瘑閽?
         String masterKeyIv = AESUtil.generateIV();
         AESUtil.EncryptResult encryptResult = AESUtil.encrypt(
                 userMasterKey.getBytes(),
                 convertSystemKey(systemMasterKey),
                 masterKeyIv
         );
-        // 存储格式: Base64(密文):authTag，便于后续解密时校验完整性
+        // 瀛樺偍鏍煎紡: Base64(瀵嗘枃):authTag锛屼究浜庡悗缁В瀵嗘椂鏍￠獙瀹屾暣鎬?
         String masterKeyEncrypted = java.util.Base64.getEncoder()
                 .encodeToString(encryptResult.getCiphertext())
                 + ":" + encryptResult.getAuthTag();
         
-        // 6. 构建用户实体
+        // 6. 鏋勫缓鐢ㄦ埛瀹炰綋
         User user = new User();
         user.setUsername(request.getUsername());
         user.setPasswordHash(passwordHash);
@@ -116,33 +117,33 @@ public class UserService {
         user.setStatus(1);
         user.setRole("user");
         
-        // 7. 插入数据库
+        // 7. 鎻掑叆鏁版嵁搴?
         userMapper.insert(user);
         
-        log.info("用户注册成功: {}", request.getUsername());
+        log.info("鐢ㄦ埛娉ㄥ唽鎴愬姛: {}", request.getUsername());
     }
     
     /**
-     * 用户登录
+     * 鐢ㄦ埛鐧诲綍
      * 
-     * 【安全流程】
-     * 1. 查询用户信息
-     * 2. 使用相同盐值重新计算密码哈希
-     * 3. 常量时间比较哈希值（防止时序攻击）
-     * 4. 检查用户状态
-     * 5. 生成JWT Token
+     * 銆愬畨鍏ㄦ祦绋嬨€?
+     * 1. 鏌ヨ鐢ㄦ埛淇℃伅
+     * 2. 浣跨敤鐩稿悓鐩愬€奸噸鏂拌绠楀瘑鐮佸搱甯?
+     * 3. 甯搁噺鏃堕棿姣旇緝鍝堝笇鍊硷紙闃叉鏃跺簭鏀诲嚮锛?
+     * 4. 妫€鏌ョ敤鎴风姸鎬?
+     * 5. 鐢熸垚JWT Token
      * 
-     * @param request 登录请求
-     * @return 登录响应（包含Token）
+     * @param request 鐧诲綍璇锋眰
+     * @return 鐧诲綍鍝嶅簲锛堝寘鍚玊oken锛?
      */
     public LoginResponse login(LoginRequest request) {
-        // 1. 查询用户（包括禁用状态的用户）
+        // 1. 鏌ヨ鐢ㄦ埛锛堝寘鎷鐢ㄧ姸鎬佺殑鐢ㄦ埛锛?
         User user = userMapper.selectByUsernameIncludeDisabled(request.getUsername());
         if (user == null) {
-            throw new RuntimeException("用户名或密码错误");
+            throw new RuntimeException("鐢ㄦ埛鍚嶆垨瀵嗙爜閿欒");
         }
         
-        // 2. 验证密码
+        // 2. 楠岃瘉瀵嗙爜
         boolean valid = PasswordUtil.verifyPassword(
                 request.getPassword(),
                 user.getPasswordSalt(),
@@ -151,25 +152,25 @@ public class UserService {
         
         if (!valid) {
             log.warn("用户 {} 登录失败：密码错误", request.getUsername());
-            throw new RuntimeException("用户名或密码错误");
+            throw new RuntimeException("鐢ㄦ埛鍚嶆垨瀵嗙爜閿欒");
         }
         
-        // 3. 检查用户状态
+        // 3. 妫€鏌ョ敤鎴风姸鎬?
         if (user.getStatus() == null || user.getStatus() != 1) {
             log.warn("用户 {} 登录失败：账号已被禁用", request.getUsername());
             throw new RuntimeException("账号已被禁用，请联系管理员");
         }
         
-        // 4. 生成JWT Token
+        // 4. 鐢熸垚JWT Token
         String token = jwtUtil.generateToken(user.getId(), user.getUsername());
         
-        log.info("用户登录成功: {}", request.getUsername());
+        log.info("鐢ㄦ埛鐧诲綍鎴愬姛: {}", request.getUsername());
         
         return new LoginResponse(token, user.getId(), user.getUsername(), user.getRole());
     }
 
     /**
-     * 获取用户资料
+     * 鑾峰彇鐢ㄦ埛璧勬枡
      */
     public UserProfileResponse getProfile(Long userId) {
         User user = getUserById(userId);
@@ -186,7 +187,7 @@ public class UserService {
     }
 
     /**
-     * 更新用户资料（昵称/邮箱）
+     * 鏇存柊鐢ㄦ埛璧勬枡锛堟樀绉?閭锛?
      */
     public void updateProfile(Long userId, UpdateProfileRequest request) {
         User user = getUserById(userId);
@@ -214,7 +215,7 @@ public class UserService {
                         user.getPasswordHash()
                 );
                 if (!valid) {
-                    throw new RuntimeException("密码确认失败");
+                    throw new RuntimeException("瀵嗙爜纭澶辫触");
                 }
                 User existUser = userMapper.selectByUsernameIncludeDisabled(newUsername);
                 if (existUser != null && !existUser.getId().equals(userId)) {
@@ -243,12 +244,12 @@ public class UserService {
         wrapper.set("updated_at", LocalDateTime.now());
         int updated = userMapper.update(null, wrapper);
         if (updated == 0) {
-            throw new RuntimeException("更新失败，请重试");
+            throw new RuntimeException("鏇存柊澶辫触锛岃閲嶈瘯");
         }
     }
 
     /**
-     * 更新用户密码
+     * 鏇存柊鐢ㄦ埛瀵嗙爜
      */
     public void updatePassword(Long userId, UpdatePasswordRequest request) {
         User user = getUserById(userId);
@@ -275,19 +276,19 @@ public class UserService {
         update.setUpdatedAt(LocalDateTime.now());
         int updated = userMapper.updateById(update);
         if (updated == 0) {
-            throw new RuntimeException("密码更新失败");
+            throw new RuntimeException("瀵嗙爜鏇存柊澶辫触");
         }
     }
 
     /**
-     * 更新用户头像
+     * 鏇存柊鐢ㄦ埛澶村儚
      */
     public void updateAvatar(Long userId, MultipartFile file) {
         if (file == null || file.isEmpty()) {
-            throw new RuntimeException("头像文件不能为空");
+            throw new RuntimeException("澶村儚鏂囦欢涓嶈兘涓虹┖");
         }
         if (file.getSize() > MAX_AVATAR_SIZE) {
-            throw new RuntimeException("头像文件不能超过2MB");
+            throw new RuntimeException("澶村儚鏂囦欢涓嶈兘瓒呰繃2MB");
         }
         String contentType = file.getContentType();
         if (contentType == null || !contentType.startsWith("image/")) {
@@ -316,15 +317,15 @@ public class UserService {
             update.setUpdatedAt(LocalDateTime.now());
             int updated = userMapper.updateById(update);
             if (updated == 0) {
-                throw new RuntimeException("头像更新失败");
+                throw new RuntimeException("澶村儚鏇存柊澶辫触");
             }
         } catch (java.io.IOException e) {
-            throw new RuntimeException("头像保存失败", e);
+            throw new RuntimeException("澶村儚淇濆瓨澶辫触", e);
         }
     }
 
     /**
-     * 获取用户头像数据
+     * 鑾峰彇鐢ㄦ埛澶村儚鏁版嵁
      */
     public byte[] getAvatarData(Long userId) {
         User user = getUserById(userId);
@@ -338,13 +339,70 @@ public class UserService {
         try {
             return java.nio.file.Files.readAllBytes(path);
         } catch (java.io.IOException e) {
-            throw new RuntimeException("读取头像失败", e);
+            throw new RuntimeException("璇诲彇澶村儚澶辫触", e);
         }
     }
 
     /**
-     * 获取安全的图片扩展名
+     * 鏇存柊鑱婂ぉ鑳屾櫙
      */
+    public void updateChatBackground(Long userId, Long sessionId, MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            throw new RuntimeException("鑱婂ぉ鑳屾櫙鏂囦欢涓嶈兘涓虹┖");
+        }
+        if (file.getSize() > MAX_CHAT_BACKGROUND_SIZE) {
+            throw new RuntimeException("鑱婂ぉ鑳屾櫙鍥剧墖涓嶈兘瓒呰繃5MB");
+        }
+        String contentType = file.getContentType();
+        if (contentType == null || !contentType.startsWith("image/")) {
+            throw new RuntimeException("聊天背景必须是图片文件");
+        }
+
+        String originalName = file.getOriginalFilename();
+        String ext = getSafeImageExtension(originalName, contentType);
+
+        try {
+            java.nio.file.Path backgroundDir = java.nio.file.Paths.get(storageRoot, "chat-backgrounds");
+            java.nio.file.Files.createDirectories(backgroundDir);
+            String filename = "chat_bg_" + userId + "_s" + sessionId + "_" + System.currentTimeMillis() + ext;
+            java.nio.file.Path target = backgroundDir.resolve(filename);
+            file.transferTo(target.toFile());
+
+            for (java.nio.file.Path oldPath : listChatBackgroundFiles(userId, sessionId)) {
+                if (!oldPath.equals(target)) {
+                    java.nio.file.Files.deleteIfExists(oldPath);
+                }
+            }
+            return;
+
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("鑱婂ぉ鑳屾櫙淇濆瓨澶辫触", e);
+        }
+    }
+
+    /**
+     * 鑾峰彇鑱婂ぉ鑳屾櫙鏁版嵁
+     */
+    public byte[] getChatBackgroundData(Long userId, Long sessionId) {
+        java.nio.file.Path resolvedPath = resolveChatBackgroundPath(userId, sessionId);
+        if (resolvedPath != null) {
+            try {
+                return java.nio.file.Files.readAllBytes(resolvedPath);
+            } catch (java.io.IOException e) {
+                throw new RuntimeException("璇诲彇鑱婂ぉ鑳屾櫙澶辫触", e);
+            }
+        }
+        throw new RuntimeException("用户未设置聊天背景");
+    }
+
+    /**
+     * 鑾峰彇瀹夊叏鐨勫浘鐗囨墿灞曞悕
+     */
+    public String getChatBackgroundPath(Long userId, Long sessionId) {
+        java.nio.file.Path path = resolveChatBackgroundPath(userId, sessionId);
+        return path == null ? null : path.toString();
+    }
+
     private String getSafeImageExtension(String filename, String contentType) {
         String ext = null;
         if (filename != null) {
@@ -375,11 +433,44 @@ public class UserService {
     }
     
     /**
-     * 根据用户ID查询用户
+     * 鏍规嵁鐢ㄦ埛ID鏌ヨ鐢ㄦ埛
      * 
-     * @param userId 用户ID
-     * @return 用户信息
+     * @param userId 鐢ㄦ埛ID
+     * @return 鐢ㄦ埛淇℃伅
      */
+    private java.nio.file.Path resolveChatBackgroundPath(Long userId, Long sessionId) {
+        java.util.List<java.nio.file.Path> files = listChatBackgroundFiles(userId, sessionId);
+        if (files.isEmpty()) {
+            return null;
+        }
+        files.sort((a, b) -> {
+            try {
+                return java.nio.file.Files.getLastModifiedTime(b)
+                        .compareTo(java.nio.file.Files.getLastModifiedTime(a));
+            } catch (java.io.IOException e) {
+                return b.getFileName().toString().compareTo(a.getFileName().toString());
+            }
+        });
+        return files.get(0);
+    }
+
+    private java.util.List<java.nio.file.Path> listChatBackgroundFiles(Long userId, Long sessionId) {
+        java.util.List<java.nio.file.Path> files = new java.util.ArrayList<>();
+        java.nio.file.Path backgroundDir = java.nio.file.Paths.get(storageRoot, "chat-backgrounds");
+        if (!java.nio.file.Files.exists(backgroundDir)) {
+            return files;
+        }
+        String prefix = "chat_bg_" + userId + "_s" + sessionId + "_";
+        try (java.util.stream.Stream<java.nio.file.Path> stream = java.nio.file.Files.list(backgroundDir)) {
+            stream.filter(java.nio.file.Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().startsWith(prefix))
+                    .forEach(files::add);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("璇诲彇鑱婂ぉ鑳屾櫙鐩綍澶辫触", e);
+        }
+        return files;
+    }
+
     public User getUserById(Long userId) {
         User user = userMapper.selectById(userId);
         if (user == null) {
@@ -389,17 +480,17 @@ public class UserService {
     }
     
     /**
-     * 获取用户的主密钥（解密后）
+     * 鑾峰彇鐢ㄦ埛鐨勪富瀵嗛挜锛堣В瀵嗗悗锛?
      * 
-     * 【用途】用于加密/解密文件密钥
+     * 銆愮敤閫斻€戠敤浜庡姞瀵?瑙ｅ瘑鏂囦欢瀵嗛挜
      * 
-     * 【安全流程】
-     * 1. 从DN读取加密后的masterKey
-     * 2. 使用系统主密钥解密，还原用户主密钥
-     * 3. 对于旧版本未存储authTag的用户，使用确定性密钥兼容
+     * 銆愬畨鍏ㄦ祦绋嬨€?
+     * 1. 浠嶥N璇诲彇鍔犲瘑鍚庣殑masterKey
+     * 2. 浣跨敤绯荤粺涓诲瘑閽ヨВ瀵嗭紝杩樺師鐢ㄦ埛涓诲瘑閽?
+     * 3. 瀵逛簬鏃х増鏈湭瀛樺偍authTag鐨勭敤鎴凤紝浣跨敤纭畾鎬у瘑閽ュ吋瀹?
      * 
-     * @param userId 用户ID
-     * @return 用户主密钥（Base64编码）
+     * @param userId 鐢ㄦ埛ID
+     * @return 鐢ㄦ埛涓诲瘑閽ワ紙Base64缂栫爜锛?
      */
     public String getUserMasterKey(Long userId) {
         User user = getUserById(userId);
@@ -407,7 +498,7 @@ public class UserService {
         String encrypted = user.getMasterKeyEncrypted();
         String iv = user.getMasterKeyIv();
         
-        // 新版格式: "Base64(ciphertext):authTag"
+        // 鏂扮増鏍煎紡: "Base64(ciphertext):authTag"
         if (encrypted != null && encrypted.contains(":")) {
             try {
                 String[] parts = encrypted.split(":");
@@ -419,12 +510,12 @@ public class UserService {
                     return new String(masterKeyBytes, java.nio.charset.StandardCharsets.UTF_8);
                 }
             } catch (Exception e) {
-                log.warn("解密用户主密钥失败(userId={}):，回退到兼容模式", userId, e);
+                log.warn("解密用户主密钥失败 (userId={})，回退到兼容模式", userId, e);
             }
         }
         
-        // 旧版兼容：基于用户ID生成确定性密钥
-        log.debug("使用兼容模式密钥: userId={}", userId);
+        // 鏃х増鍏煎锛氬熀浜庣敤鎴稩D鐢熸垚纭畾鎬у瘑閽?
+        log.debug("浣跨敤鍏煎妯″紡瀵嗛挜: userId={}", userId);
         String deterministicKey = String.format("UserMasterKey%020d", userId);
         byte[] keyBytes = new byte[32];
         byte[] sourceBytes = deterministicKey.getBytes();
@@ -434,12 +525,12 @@ public class UserService {
     }
     
     /**
-     * 转换系统密钥为Base64格式
+     * 杞崲绯荤粺瀵嗛挜涓築ase64鏍煎紡
      * 
-     * 【说明】配置文件中的密钥是字符串，需要转换为Base64编码的密钥
+     * 銆愯鏄庛€戦厤缃枃浠朵腑鐨勫瘑閽ユ槸瀛楃涓诧紝闇€瑕佽浆鎹负Base64缂栫爜鐨勫瘑閽?
      */
     private String convertSystemKey(String key) {
-        // 确保密钥是32字节（256位）
+        // 纭繚瀵嗛挜鏄?2瀛楄妭锛?56浣嶏級
         byte[] keyBytes = key.getBytes();
         if (keyBytes.length < 32) {
             byte[] paddedKey = new byte[32];
@@ -454,19 +545,19 @@ public class UserService {
     }
     
     /**
-     * 注销账号
-     * 删除用户及其所有文件
+     * 娉ㄩ攢璐﹀彿
+     * 鍒犻櫎鐢ㄦ埛鍙婂叾鎵€鏈夋枃浠?
      * 
-     * @param userId 用户ID
+     * @param userId 鐢ㄦ埛ID
      */
     @Transactional(rollbackFor = Exception.class)
     public void deleteAccount(Long userId) {
-        // 1. 删除用户的所有文件（物理删除）
+        // 1. 鍒犻櫎鐢ㄦ埛鐨勬墍鏈夋枃浠讹紙鐗╃悊鍒犻櫎锛?
         fileService.deleteAllUserFiles(userId);
         
-        // 2. 删除用户账号
+        // 2. 鍒犻櫎鐢ㄦ埛璐﹀彿
         userMapper.deleteById(userId);
         
-        log.info("用户 {} 的账号及所有文件已删除", userId);
+        log.info("鐢ㄦ埛 {} 鐨勮处鍙峰強鎵€鏈夋枃浠跺凡鍒犻櫎", userId);
     }
 }
