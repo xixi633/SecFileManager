@@ -129,21 +129,24 @@
         <div class="upload-list-header">
           <span>上传列表（{{ uploadTasks.length }}）</span>
           <div class="upload-list-actions">
-            <span v-if="!uploadListExpanded && foldedTaskCount > 0" class="upload-fold-hint">
+            <span v-if="!uploadListCollapsed && !uploadListExpanded && foldedTaskCount > 0" class="upload-fold-hint">
               其余 {{ foldedTaskCount }} 项已折叠
             </span>
             <el-button
-              v-if="uploadTasks.length > 1"
+              v-if="!uploadListCollapsed && uploadTasks.length > 1"
               text
               type="primary"
               @click="toggleUploadListExpanded"
             >
               {{ uploadListExpanded ? '收起' : `展开全部（${uploadTasks.length}）` }}
             </el-button>
+            <el-button text type="primary" @click="toggleUploadListCollapsed">
+              {{ uploadListCollapsed ? '展开列表' : '折叠列表' }}
+            </el-button>
             <el-button text type="primary" @click="clearFinishedTasks">清理已结束</el-button>
           </div>
         </div>
-        <el-table :data="displayUploadTasks" size="small" border max-height="260">
+        <el-table v-show="!uploadListCollapsed" :data="displayUploadTasks" size="small" border max-height="260">
           <el-table-column prop="name" label="文件" min-width="220" show-overflow-tooltip />
           <el-table-column label="状态" width="110" align="center">
             <template #default="scope">
@@ -172,6 +175,10 @@
             </template>
           </el-table-column>
         </el-table>
+        <div v-if="uploadListCollapsed" class="upload-list-collapsed-summary">
+          <span>上传列表已折叠</span>
+          <span class="upload-list-collapsed-meta">进行中 {{ activeTaskCount }} 项</span>
+        </div>
       </el-card>
     </transition>
 
@@ -370,14 +377,21 @@ const hasSelection = computed(() => selectedRows.value.length > 0);
 const typeCategoryOptions = TYPE_CATEGORY_OPTIONS;
 
 const MAX_BATCH_UPLOAD_COUNT = 10;
+const uploadListCollapsed = ref(false);
 const uploadListExpanded = ref(false);
-const displayUploadTasks = computed(() => {
+const visibleUploadTasks = computed(() => {
   if (uploadListExpanded.value) {
     return uploadTasks.value;
   }
   return uploadTasks.value.slice(0, 1);
 });
-const foldedTaskCount = computed(() => Math.max(0, uploadTasks.value.length - displayUploadTasks.value.length));
+const displayUploadTasks = computed(() => (
+  uploadListCollapsed.value ? [] : visibleUploadTasks.value
+));
+const foldedTaskCount = computed(() => Math.max(0, uploadTasks.value.length - visibleUploadTasks.value.length));
+const activeTaskCount = computed(() => uploadTasks.value.filter(
+  (task) => ['queued', 'compressing', 'uploading', 'finalizing'].includes(task.status)
+).length);
 const AI_FILE_LOCATE_EVENT = 'ai-file-locate';
 
 
@@ -645,12 +659,19 @@ watch(
     if (length <= 1) {
       uploadListExpanded.value = false;
     }
+    if (length === 0) {
+      uploadListCollapsed.value = false;
+    }
   }
 );
 
 const toggleUploadListExpanded = () => {
   if (uploadTasks.value.length <= 1) return;
   uploadListExpanded.value = !uploadListExpanded.value;
+};
+
+const toggleUploadListCollapsed = () => {
+  uploadListCollapsed.value = !uploadListCollapsed.value;
 };
 
 const selectFiles = () => {
@@ -1075,6 +1096,21 @@ onBeforeUnmount(() => {
 }
 
 .upload-fold-hint {
+  font-size: 12px;
+  color: #909399;
+}
+
+.upload-list-collapsed-summary {
+  padding: 10px 12px;
+  border: 1px dashed #dcdfe6;
+  border-radius: 8px;
+  color: #606266;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.upload-list-collapsed-meta {
   font-size: 12px;
   color: #909399;
 }

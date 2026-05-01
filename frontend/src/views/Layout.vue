@@ -42,6 +42,10 @@
           <el-icon><Lock /></el-icon>
           <span>安全说明</span>
         </el-menu-item>
+        <el-menu-item index="/game">
+          <el-icon><Monitor /></el-icon>
+          <span>游戏</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
     
@@ -151,7 +155,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Document, Setting, Lock, Delete, Files, UserFilled, CaretBottom, ChatLineRound, Bell } from '@element-plus/icons-vue';
+import { Document, Setting, Lock, Delete, Files, UserFilled, CaretBottom, ChatLineRound, Bell, Monitor } from '@element-plus/icons-vue';
 import { useUser } from '../composables/useUser.js';
 import AiChat from '../components/AiChat.vue';
 import api from '../api/index.js';
@@ -172,7 +176,11 @@ import {
 
 const router = useRouter();
 const route = useRoute();
-const currentRoute = ref(route.path);
+const currentRoute = computed(() => {
+  const p = route.path;
+  if (p.startsWith('/game')) return '/game';
+  return p;
+});
 const messageCenterVisible = ref(false);
 const chatWsRef = ref(null);
 const chatCountInitialized = ref(false);
@@ -188,10 +196,9 @@ const sortedSystemNotifications = computed(() => {
 });
 
 // 监听路由变化
-watch(() => route.path, (newPath) => {
-  currentRoute.value = newPath;
+watch(() => route.path, () => {
   refreshMessageCenterSummary();
-  if (newPath === '/chat') {
+  if (route.path === '/chat') {
     window.setTimeout(() => {
       refreshMessageCenterSummary();
     }, 800);
@@ -400,13 +407,16 @@ function formatNotificationTime(timestamp) {
 }
 
 const pageTitle = computed(() => {
-  switch (currentRoute.value) {
+  const p = currentRoute.value;
+  switch (p) {
     case '/files':
       return '文件列表';
     case '/recycle':
       return '回收站';
     case '/chat':
       return '好友聊天';
+    case '/game':
+      return '游戏';
     case '/settings':
       return '个人设置';
     case '/security':
@@ -541,6 +551,10 @@ const handleCommand = (command) => {
   flex: 1;
   padding: 20px;
   overflow-y: auto;
+  scrollbar-width: none;
+}
+.app-main::-webkit-scrollbar {
+  display: none;
 }
 
 /* 路由切换动画 */

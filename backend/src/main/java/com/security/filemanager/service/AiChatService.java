@@ -1,4 +1,4 @@
-﻿﻿package com.security.filemanager.service;
+package com.security.filemanager.service;
 
 import com.alibaba.dashscope.aigc.generation.Generation;
 import com.alibaba.dashscope.aigc.generation.GenerationParam;

@@ -6,6 +6,7 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
@@ -37,6 +38,7 @@ public class AESUtil {
     private static final int KEY_SIZE = 256; // 256位密钥
     private static final int IV_LENGTH = 12;  // GCM推荐12字节IV
     private static final int TAG_LENGTH = 128; // 128位认证标签
+    private static final int STREAM_BUFFER_SIZE = 1024 * 1024;
     
     private static final SecureRandom secureRandom = new SecureRandom();
     
@@ -146,6 +148,54 @@ public class AESUtil {
             throw new RuntimeException("加密失败", e);
         }
     }
+
+    /**
+     * AES-GCM 流式加密，将明文流写入密文输出流。
+     *
+     * @param plaintext 明文输入流
+     * @param keyBase64 AES密钥（Base64编码）
+     * @param ivHex IV（Hex编码）
+     * @param ciphertextOutput 密文输出流
+     * @return 认证标签与处理字节数
+     */
+    public static EncryptStreamResult encryptStreamToStream(InputStream plaintext, String keyBase64, String ivHex, OutputStream ciphertextOutput) {
+        try {
+            byte[] keyBytes = Base64.getDecoder().decode(keyBase64);
+            byte[] iv = hexToBytes(ivHex);
+
+            SecretKeySpec secretKey = new SecretKeySpec(keyBytes, ALGORITHM);
+
+            Cipher cipher = Cipher.getInstance(TRANSFORMATION);
+            GCMParameterSpec gcmSpec = new GCMParameterSpec(TAG_LENGTH, iv);
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, gcmSpec);
+
+            byte[] buffer = new byte[STREAM_BUFFER_SIZE];
+            long bytesProcessed = 0;
+            int read;
+            while ((read = plaintext.read(buffer)) != -1) {
+                bytesProcessed += read;
+                byte[] output = cipher.update(buffer, 0, read);
+                if (output != null && output.length > 0) {
+                    ciphertextOutput.write(output);
+                }
+            }
+
+            byte[] finalOutput = cipher.doFinal();
+            int tagLength = TAG_LENGTH / 8;
+            int ciphertextLength = finalOutput.length - tagLength;
+            if (ciphertextLength > 0) {
+                ciphertextOutput.write(finalOutput, 0, ciphertextLength);
+            }
+
+            byte[] authTag = new byte[tagLength];
+            System.arraycopy(finalOutput, ciphertextLength, authTag, 0, tagLength);
+            return new EncryptStreamResult(bytesToHex(authTag), bytesProcessed);
+
+        } catch (Exception e) {
+            log.error("AES加密失败", e);
+            throw new RuntimeException("加密失败", e);
+        }
+    }
     
     /**
      * AES-GCM 解密
@@ -249,6 +299,24 @@ public class AESUtil {
         
         public String getAuthTag() {
             return authTag;
+        }
+    }
+
+    public static class EncryptStreamResult {
+        private final String authTag;
+        private final long bytesProcessed;
+
+        public EncryptStreamResult(String authTag, long bytesProcessed) {
+            this.authTag = authTag;
+            this.bytesProcessed = bytesProcessed;
+        }
+
+        public String getAuthTag() {
+            return authTag;
+        }
+
+        public long getBytesProcessed() {
+            return bytesProcessed;
         }
     }
 }

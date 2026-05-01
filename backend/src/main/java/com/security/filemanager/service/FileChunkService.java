@@ -16,14 +16,18 @@ import java.io.*;
 import java.net.URLConnection;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -52,6 +56,9 @@ public class FileChunkService {
     private static final int CHUNK_TAG_LEN = 16;
     private static final int CHUNK_HEADER_SIZE = 4 + 1 + 1 + 4 + 8;
     private static final int STORAGE_STREAM_BUFFER_SIZE = 1024 * 1024;
+    private static final String CHUNK_TEMP_DIR = "_chunk_tmp";
+    private static final String CHUNK_FILE_SUFFIX = ".chunk";
+    private static final String CHUNK_TEMP_SUFFIX = ".part";
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private static final Map<String, UploadSession> SESSIONS = new ConcurrentHashMap<>();
@@ -89,16 +96,6 @@ public class FileChunkService {
         public int getProgress() { return totalBytes <= 0 ? 0 : (int) Math.min(100, uploadedBytes * 100 / totalBytes); }
     }
 
-    private static class PendingChunk {
-        final int chunkNumber;
-        final byte[] data;
-
-        PendingChunk(int chunkNumber, byte[] data) {
-            this.chunkNumber = chunkNumber;
-            this.data = data;
-        }
-    }
-
     private static class CompletedUploadResult {
         final Long userId;
         final Long fileId;
@@ -124,7 +121,9 @@ public class FileChunkService {
         final String baseIvHex;
         final MessageDigest digest;
         final ByteArrayOutputStream tagBuffer = new ByteArrayOutputStream();
-        final Map<Integer, PendingChunk> pendingChunks = new ConcurrentHashMap<>();
+        final Set<Integer> pendingChunkFiles = ConcurrentHashMap.newKeySet();
+        final Set<Integer> writingChunks = ConcurrentHashMap.newKeySet();
+        final File chunkTempDir;
         final BufferedOutputStream bos;
         int nextChunkNumber = 0;
         long processedSize = 0;
@@ -133,7 +132,8 @@ public class FileChunkService {
 
         UploadSession(String identifier, Long userId, String filename, long totalSize, int totalChunks,
                       File storageFile, String fileKey, String encryptedFileKey,
-                      byte[] baseIv, String baseIvHex, MessageDigest digest, BufferedOutputStream bos) {
+                      byte[] baseIv, String baseIvHex, MessageDigest digest, BufferedOutputStream bos,
+                      File chunkTempDir) {
             this.identifier = identifier;
             this.userId = userId;
             this.filename = filename;
@@ -146,6 +146,7 @@ public class FileChunkService {
             this.baseIvHex = baseIvHex;
             this.digest = digest;
             this.bos = bos;
+            this.chunkTempDir = chunkTempDir;
         }
     }
 
@@ -161,6 +162,61 @@ public class FileChunkService {
         return AESUtil.bytesToHex(buffer.array());
     }
 
+    private File buildChunkTempDir(String identifier) {
+        String safeId = AESUtil.sha256(identifier.getBytes(StandardCharsets.UTF_8));
+        return Paths.get(storageRoot, CHUNK_TEMP_DIR, safeId).toFile();
+    }
+
+    private File getChunkFile(UploadSession s, int chunkNumber) {
+        return new File(s.chunkTempDir, chunkNumber + CHUNK_FILE_SUFFIX);
+    }
+
+    private File getChunkTempFile(UploadSession s, int chunkNumber) {
+        return new File(s.chunkTempDir, chunkNumber + CHUNK_TEMP_SUFFIX);
+    }
+
+    private void persistChunkToTempFile(MultipartFile file, File tempFile) throws IOException {
+        if (tempFile.getParentFile() != null && !tempFile.getParentFile().exists()) {
+            tempFile.getParentFile().mkdirs();
+        }
+        try (InputStream input = file.getInputStream();
+             BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(tempFile), STORAGE_STREAM_BUFFER_SIZE)) {
+            byte[] buffer = new byte[STORAGE_STREAM_BUFFER_SIZE];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+        }
+    }
+
+    private void moveTempFile(File tempFile, File targetFile) throws IOException {
+        try {
+            Files.move(tempFile.toPath(), targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException ex) {
+            Files.move(tempFile.toPath(), targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private void cleanupChunkTempDir(UploadSession s) {
+        if (s == null || s.chunkTempDir == null) return;
+        deleteDirectoryQuietly(s.chunkTempDir);
+    }
+
+    private void deleteDirectoryQuietly(File dir) {
+        if (dir == null || !dir.exists()) return;
+        File[] entries = dir.listFiles();
+        if (entries != null) {
+            for (File entry : entries) {
+                if (entry.isDirectory()) {
+                    deleteDirectoryQuietly(entry);
+                } else {
+                    try { Files.deleteIfExists(entry.toPath()); } catch (Exception ignored) {}
+                }
+            }
+        }
+        try { Files.deleteIfExists(dir.toPath()); } catch (Exception ignored) {}
+    }
+
     private void writeChunkedHeader(BufferedOutputStream os, int chunkSize, byte[] baseIv) throws IOException {
         ByteBuffer b = ByteBuffer.allocate(CHUNK_HEADER_SIZE).order(ByteOrder.BIG_ENDIAN);
         b.put(CHUNK_MAGIC).put(CHUNK_VERSION).put(FLAG_CHUNKED).putInt(chunkSize).put(baseIv);
@@ -172,10 +228,18 @@ public class FileChunkService {
             File storageFile = new File(generateStoragePath());
             if (storageFile.getParentFile() != null) storageFile.getParentFile().mkdirs();
 
+            File chunkTempDir = buildChunkTempDir(r.getIdentifier());
+            if (chunkTempDir.exists()) {
+                deleteDirectoryQuietly(chunkTempDir);
+            }
+            if (!chunkTempDir.mkdirs() && !chunkTempDir.exists()) {
+                throw new IOException("无法创建分片临时目录");
+            }
+
             String fileKey = AESUtil.generateKey();
             String userMasterKey = userService.getUserMasterKey(r.getUserId());
             String fileKeyIv = AESUtil.generateIV();
-            AESUtil.EncryptResult kr = AESUtil.encrypt(fileKey.getBytes(java.nio.charset.StandardCharsets.UTF_8), userMasterKey, fileKeyIv);
+            AESUtil.EncryptResult kr = AESUtil.encrypt(fileKey.getBytes(StandardCharsets.UTF_8), userMasterKey, fileKeyIv);
             String encryptedFileKey = Base64.getEncoder().encodeToString(kr.getCiphertext()) + ":" + kr.getAuthTag() + ":" + fileKeyIv;
 
             byte[] baseIv = new byte[CHUNK_IV_BASE_LEN];
@@ -190,8 +254,8 @@ public class FileChunkService {
             }
             writeChunkedHeader(bos, chunkSize, baseIv);
 
-            UploadSession s = new UploadSession(r.getIdentifier(), r.getUserId(), r.getFilename(), r.getTotalSize(), r.getTotalChunks(),
-                    storageFile, fileKey, encryptedFileKey, baseIv, baseIvHex, digest, bos);
+                UploadSession s = new UploadSession(r.getIdentifier(), r.getUserId(), r.getFilename(), r.getTotalSize(), r.getTotalChunks(),
+                    storageFile, fileKey, encryptedFileKey, baseIv, baseIvHex, digest, bos, chunkTempDir);
             s.stage = UploadStage.UPLOADING;
             return s;
         } catch (Exception e) {
@@ -223,7 +287,11 @@ public class FileChunkService {
 
     public boolean checkChunk(String identifier, Integer chunkNumber) {
         UploadSession s = SESSIONS.get(identifier);
-        return s != null && chunkNumber != null && !isExpired(s) && chunkNumber < s.nextChunkNumber;
+        return s != null && chunkNumber != null && !isExpired(s)
+                && (chunkNumber < s.nextChunkNumber
+                || s.pendingChunkFiles.contains(chunkNumber)
+                || s.writingChunks.contains(chunkNumber)
+                || getChunkFile(s, chunkNumber).exists());
     }
 
     public UploadStatus getUploadStatus(String identifier, Long userId) {
@@ -242,38 +310,51 @@ public class FileChunkService {
     public void saveChunk(MultipartFile file, ChunkUploadRequest r) {
         if (r.getUserId() == null) throw BizException.badRequest("UPLOAD_USER_MISSING", "用户信息缺失");
         if (r.getChunkNumber() == null) throw BizException.badRequest("UPLOAD_CHUNK_NUMBER_MISSING", "分片序号缺失");
+        if (r.getIdentifier() == null || r.getIdentifier().isEmpty()) {
+            throw BizException.badRequest("UPLOAD_IDENTIFIER_MISSING", "文件标识缺失");
+        }
 
         UploadSession s = SESSIONS.computeIfAbsent(r.getIdentifier(), k -> createSession(r));
         try {
+            int chunkNumber;
             synchronized (s) {
-                int chunkNumber = validateChunkRequestLocked(s, r);
-                if (chunkNumber < s.nextChunkNumber || s.pendingChunks.containsKey(chunkNumber)) {
+                chunkNumber = validateChunkRequestLocked(s, r);
+                if (chunkNumber < s.nextChunkNumber) {
                     return;
                 }
+                if (chunkNumber == s.nextChunkNumber) {
+                    try (InputStream input = file.getInputStream()) {
+                        processChunkStream(s, chunkNumber, input);
+                    }
+                    flushPendingChunks(s);
+                    finalizeIfCompleted(s);
+                    return;
+                }
+                if (s.pendingChunkFiles.contains(chunkNumber) || s.writingChunks.contains(chunkNumber)) {
+                    return;
+                }
+                s.writingChunks.add(chunkNumber);
             }
 
-            byte[] chunk = file.getBytes();
+            File tempFile = getChunkTempFile(s, chunkNumber);
+            File finalFile = getChunkFile(s, chunkNumber);
+            try {
+                persistChunkToTempFile(file, tempFile);
+                moveTempFile(tempFile, finalFile);
+            } catch (Exception e) {
+                try { Files.deleteIfExists(tempFile.toPath()); } catch (Exception ignored) {}
+                throw e;
+            }
 
             synchronized (s) {
-                int chunkNumber = validateChunkRequestLocked(s, r);
-                if (chunkNumber < s.nextChunkNumber || s.pendingChunks.containsKey(chunkNumber)) {
+                s.writingChunks.remove(chunkNumber);
+                if (chunkNumber < s.nextChunkNumber) {
+                    try { Files.deleteIfExists(finalFile.toPath()); } catch (Exception ignored) {}
                     return;
                 }
-
-                if (chunkNumber == s.nextChunkNumber) {
-                    processChunkData(s, chunkNumber, chunk);
-                    flushPendingChunks(s);
-                } else {
-                    s.pendingChunks.put(chunkNumber, new PendingChunk(chunkNumber, chunk));
-                }
-
-                if (s.nextChunkNumber == s.totalChunks) {
-                    s.stage = UploadStage.FINALIZING;
-                    Long fileId = finalizeSession(s);
-                    s.stage = UploadStage.DONE;
-                    SESSIONS.remove(s.identifier);
-                    COMPLETED_UPLOADS.put(s.identifier, new CompletedUploadResult(s.userId, fileId));
-                }
+                s.pendingChunkFiles.add(chunkNumber);
+                flushPendingChunks(s);
+                finalizeIfCompleted(s);
             }
         } catch (BizException e) {
             throw e;
@@ -289,21 +370,46 @@ public class FileChunkService {
 
     private void flushPendingChunks(UploadSession s) throws Exception {
         while (true) {
-            PendingChunk pending = s.pendingChunks.remove(s.nextChunkNumber);
-            if (pending == null) {
+            int chunkNumber = s.nextChunkNumber;
+            File chunkFile = getChunkFile(s, chunkNumber);
+            if (!chunkFile.exists()) {
                 break;
             }
-            processChunkData(s, pending.chunkNumber, pending.data);
+            try (InputStream input = new BufferedInputStream(new FileInputStream(chunkFile), STORAGE_STREAM_BUFFER_SIZE)) {
+                processChunkStream(s, chunkNumber, input);
+            }
+            s.pendingChunkFiles.remove(chunkNumber);
+            try { Files.deleteIfExists(chunkFile.toPath()); } catch (Exception ignored) {}
         }
     }
 
-    private void processChunkData(UploadSession s, int chunkNumber, byte[] chunkData) throws Exception {
+    private void processChunkStream(UploadSession s, int chunkNumber, InputStream chunkStream) throws Exception {
+        DigestInputStream digestStream = new DigestInputStream(chunkStream, s.digest);
+        String iv = buildChunkIvHex(s.baseIv, chunkNumber);
+        AESUtil.EncryptStreamResult result = AESUtil.encryptStreamToStream(digestStream, s.fileKey, iv, s.bos);
+        s.tagBuffer.write(AESUtil.hexToBytes(result.getAuthTag()));
+        s.processedSize += result.getBytesProcessed();
+        s.nextChunkNumber++;
+    }
+
+    private void processChunkBytes(UploadSession s, int chunkNumber, byte[] chunkData) throws Exception {
         s.digest.update(chunkData);
         String iv = buildChunkIvHex(s.baseIv, chunkNumber);
         String authTag = AESUtil.encryptToStream(chunkData, s.fileKey, iv, s.bos);
         s.tagBuffer.write(AESUtil.hexToBytes(authTag));
         s.processedSize += chunkData.length;
         s.nextChunkNumber++;
+    }
+
+    private void finalizeIfCompleted(UploadSession s) throws IOException {
+        if (s.nextChunkNumber == s.totalChunks) {
+            s.stage = UploadStage.FINALIZING;
+            Long fileId = finalizeSession(s);
+            s.stage = UploadStage.DONE;
+            SESSIONS.remove(s.identifier);
+            COMPLETED_UPLOADS.put(s.identifier, new CompletedUploadResult(s.userId, fileId));
+            cleanupChunkTempDir(s);
+        }
     }
 
     private Long finalizeSession(UploadSession s) throws IOException {
@@ -352,6 +458,7 @@ public class FileChunkService {
     private void safeCloseAndDelete(UploadSession s) {
         try { s.bos.close(); } catch (Exception ignored) {}
         try { Files.deleteIfExists(s.storageFile.toPath()); } catch (Exception ignored) {}
+        cleanupChunkTempDir(s);
     }
 
     @Scheduled(fixedDelayString = "${secure-file.upload.session-cleanup-interval-ms:60000}")
