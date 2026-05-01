@@ -47,7 +47,7 @@
                         <span class="ai-file-name">{{ file.originalFilename }}</span>
                         <el-tag size="small" effect="plain" :type="getCategoryTagType(file.category)" class="ai-file-category-tag">{{ file.categoryLabel }}</el-tag>
                       </div>
-                      <span class="ai-file-meta">{{ formatSize(file.fileSize) }}</span>
+                      <span class="ai-file-meta">{{ formatSize(file.fileSize) }} · {{ formatUploadTime(file.uploadTime) }}</span>
                     </div>
                   </div>
                 </div>
@@ -269,6 +269,14 @@ function formatSize(bytes) {
   let size = bytes;
   while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
   return size.toFixed(1) + units[i];
+}
+
+function formatUploadTime(uploadTime) {
+  if (!uploadTime) return '';
+  const d = new Date(uploadTime);
+  if (isNaN(d.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function getCategoryLabel(cat) {
