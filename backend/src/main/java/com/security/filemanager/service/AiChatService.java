@@ -1,4 +1,4 @@
-package com.security.filemanager.service;
+﻿﻿package com.security.filemanager.service;
 
 import com.alibaba.dashscope.aigc.generation.Generation;
 import com.alibaba.dashscope.aigc.generation.GenerationParam;
@@ -38,7 +38,8 @@ public class AiChatService {
     private static final Set<String> IMAGE_EXTS = Set.of("jpg", "jpeg", "png", "gif", "bmp", "webp", "svg");
     private static final Set<String> VIDEO_EXTS = Set.of("mp4", "avi", "mov", "wmv", "mkv", "webm", "m4v");
     private static final Set<String> AUDIO_EXTS = Set.of("mp3", "wav", "flac", "aac", "ogg", "m4a");
-    private static final Set<String> TEXT_EXTS = Set.of("txt", "md", "rtf", "log", "ini", "conf", "yaml", "yml", "json", "xml");
+    private static final Set<String> TEXT_EXTS = Set.of("txt", "md", "rtf", "log", "ini", "conf", "yaml", "yml", "json",
+            "xml");
 
     private static final Pattern DELETE_CONFIRM_PATTERN = Pattern.compile(
             "(确认删除|确认|确定删除|确定|是的|对|没错|删吧|可以删|就删这个)",
@@ -47,7 +48,8 @@ public class AiChatService {
     private static final Pattern DELETE_CANCEL_PATTERN = Pattern.compile(
             "(取消|不删了|先不删|先别删|不用了|算了|否|不要删)",
             Pattern.CASE_INSENSITIVE);
-    private static final Set<String> CODE_EXTS = Set.of("java", "js", "ts", "jsx", "tsx", "py", "go", "c", "cpp", "h", "hpp", "cs", "php", "rb", "rs", "kt", "swift", "vue", "html", "css", "scss", "sql", "sh", "bat", "ps1");
+    private static final Set<String> CODE_EXTS = Set.of("java", "js", "ts", "jsx", "tsx", "py", "go", "c", "cpp", "h",
+            "hpp", "cs", "php", "rb", "rs", "kt", "swift", "vue", "html", "css", "scss", "sql", "sh", "bat", "ps1");
     private static final Set<String> ARCHIVE_EXTS = Set.of("zip", "rar", "7z", "tar", "gz", "bz2", "xz");
     private static final Set<String> DOCUMENT_EXTS = Set.of("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv");
 
@@ -102,53 +104,53 @@ public class AiChatService {
     private static final Pattern FILE_NOUN_PATTERN = Pattern.compile(
             "(文件|文档|报告|代码|图片|照片|视频|音频|压缩包|文件夹|目录|资料|作业|课件|论文|笔记|项目|实验报告|实验)");
 
-        private static final Pattern DELETE_INTENT_PATTERN = Pattern.compile(
+    private static final Pattern DELETE_INTENT_PATTERN = Pattern.compile(
             "(删除|删掉|移除|清理|扔掉|去掉|干掉|不要了|废弃|丢掉|放到回收站|回收站).{0,12}(文件|文档|目录|文件夹)?",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern HOW_TO_PATTERN = Pattern.compile(
+    private static final Pattern HOW_TO_PATTERN = Pattern.compile(
             "(怎么|如何|怎样|教程|步骤)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern FILE_INFO_INTENT_PATTERN = Pattern.compile(
+    private static final Pattern FILE_INFO_INTENT_PATTERN = Pattern.compile(
             "(详情|详细|信息|大小|总大小|占用|上传|下载|哈希|统计|数量|多少个|多少|清单|列表|最近|最新|最早|最旧|最老|最久|最大|最小|类型)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern DETAIL_REQUEST_PATTERN = Pattern.compile(
+    private static final Pattern DETAIL_REQUEST_PATTERN = Pattern.compile(
             "(详情|详细|信息|清单|列表|列出|具体)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern RECENT_REQUEST_PATTERN = Pattern.compile(
+    private static final Pattern RECENT_REQUEST_PATTERN = Pattern.compile(
             "(最近|最新)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern LARGEST_REQUEST_PATTERN = Pattern.compile(
+    private static final Pattern LARGEST_REQUEST_PATTERN = Pattern.compile(
             "(最大|最占空间|最占用)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern SMALLEST_REQUEST_PATTERN = Pattern.compile(
+    private static final Pattern SMALLEST_REQUEST_PATTERN = Pattern.compile(
             "(最小|最不占空间|最少占用)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern OLDEST_REQUEST_PATTERN = Pattern.compile(
+    private static final Pattern OLDEST_REQUEST_PATTERN = Pattern.compile(
             "(最早|最旧|最老|最久|最先上传|最早上传|最先)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern ORDER_LIMIT_PATTERN = Pattern.compile(
+    private static final Pattern ORDER_LIMIT_PATTERN = Pattern.compile(
             "(?:前|后|top|TOP)?\\s*(\\d{1,2})\\s*(?:个|条|份|项|个文件|条文件)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern SEVERAL_REQUEST_PATTERN = Pattern.compile(
+    private static final Pattern SEVERAL_REQUEST_PATTERN = Pattern.compile(
             "(几个|几条|几份|一些|若干)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern ORDER_NOISE_PATTERN = Pattern.compile(
+    private static final Pattern ORDER_NOISE_PATTERN = Pattern.compile(
             "(最近|最新|最早|最旧|最老|最久|最先上传|最早上传|最先|最大|最小|最占空间|最占用|最不占空间|最少占用|按大小|从大到小|从小到大|上传|下载)",
             Pattern.CASE_INSENSITIVE);
 
-        private static final Pattern QUOTED_NAME_PATTERN = Pattern.compile("[\"“'《](.+?)[\"”'》]");
+    private static final Pattern QUOTED_NAME_PATTERN = Pattern.compile("[\"“'《](.+?)[\"”'》]");
 
-        private static final Pattern FILE_NAME_HINT_PATTERN = Pattern.compile(
+    private static final Pattern FILE_NAME_HINT_PATTERN = Pattern.compile(
             "([\\u4e00-\\u9fa5A-Za-z0-9_\\-]+\\.[A-Za-z0-9]{1,8})");
 
     private static final Pattern FILE_ID_HINT_PATTERN = Pattern.compile(
@@ -539,7 +541,7 @@ public class AiChatService {
 
         String cleaned = msg
                 .replaceAll("(请|帮我|麻烦|把|将|一下|一下子|给我|可以|能否|我要|我想|帮忙)", "")
-            .replaceAll("(删除|删掉|移除|清理|扔掉|去掉|干掉|不要了|废弃|丢掉|放到回收站|回收站)", "")
+                .replaceAll("(删除|删掉|移除|清理|扔掉|去掉|干掉|不要了|废弃|丢掉|放到回收站|回收站)", "")
                 .replaceAll("(文件|文档|目录|文件夹|这个|那个|这些|那些)", "")
                 .replaceAll("[,，。！？!?：:]", " ")
                 .trim();
@@ -553,7 +555,8 @@ public class AiChatService {
         }
 
         String cleaned = msg
-                .replaceAll("(查找|搜索|找|搜|寻找|查一下|帮我找|有没有|列出|显示|看看|查看|给我|需要|要|删除|删掉|移除|清理|扔掉|去掉|干掉|不要了|废弃|丢掉|放到回收站|回收站)", " ")
+                .replaceAll("(查找|搜索|找|搜|寻找|查一下|帮我找|有没有|列出|显示|看看|查看|给我|需要|要|删除|删掉|移除|清理|扔掉|去掉|干掉|不要了|废弃|丢掉|放到回收站|回收站)",
+                        " ")
                 .replaceAll("(请|帮我|麻烦|把|将|一下|一下子|给我|我要|我想|帮忙|这个|那个|这些|那些|文件|文件夹|目录)", " ")
                 .replaceAll("[,，。！？!?：:]", " ");
         cleaned = ORDER_NOISE_PATTERN.matcher(cleaned).replaceAll(" ").trim();
@@ -908,7 +911,8 @@ public class AiChatService {
         return Comparator.comparing(FileInfo::getUploadTime, Comparator.nullsLast(Comparator.reverseOrder()));
     }
 
-    private List<FileInfo> selectOrderedFiles(List<FileInfo> files, String typeCategory, String keyword, String userMsg) {
+    private List<FileInfo> selectOrderedFiles(List<FileInfo> files, String typeCategory, String keyword,
+            String userMsg) {
         if (files == null || files.isEmpty()) {
             return Collections.emptyList();
         }
@@ -920,7 +924,8 @@ public class AiChatService {
                     .collect(Collectors.toList());
         } else {
             candidates = files.stream()
-                    .filter(file -> typeCategory == null || typeCategory.isBlank() || typeCategory.equals(resolveTypeCategory(file)))
+                    .filter(file -> typeCategory == null || typeCategory.isBlank()
+                            || typeCategory.equals(resolveTypeCategory(file)))
                     .collect(Collectors.toList());
         }
 
@@ -934,7 +939,8 @@ public class AiChatService {
     private void handleFileSearch(String userMsg, Long userId, SseEmitter emitter) throws Exception {
         String fileNameHint = extractFileNameHint(userMsg);
         boolean isOrderRequest = isOrderRequest(userMsg);
-        String keyword = fileNameHint != null ? fileNameHint : (isOrderRequest ? extractOrderAwareKeyword(userMsg) : extractKeyword(userMsg));
+        String keyword = fileNameHint != null ? fileNameHint
+                : (isOrderRequest ? extractOrderAwareKeyword(userMsg) : extractKeyword(userMsg));
         String typeCategory = extractTypeCategory(userMsg);
         boolean isStandaloneType = STANDALONE_TYPE_PATTERN.matcher(userMsg.trim()).find();
         int orderLimit = isOrderRequest ? extractOrderResultLimit(userMsg) : DEFAULT_ORDER_RESULT_LIMIT;
@@ -980,7 +986,8 @@ public class AiChatService {
             for (int i = 0; i < previewCount; i++) {
                 FileInfo file = matchedFiles.get(i);
                 intro.append("\n- ").append(file.getOriginalFilename())
-                        .append("（").append(formatFileSize(file.getFileSize())).append("）");
+                        .append("（").append(formatFileSize(file.getFileSize()))
+                        .append("，上传于 ").append(formatUploadTime(file)).append("）");
             }
         }
 
@@ -1111,19 +1118,21 @@ public class AiChatService {
         String fileNameHint = extractFileNameHint(userMsg);
         boolean isOrderRequest = isOrderRequest(userMsg);
         String keyword = fileNameHint != null ? fileNameHint
-            : (isStandaloneType ? null : (isOrderRequest ? extractOrderAwareKeyword(userMsg) : extractKeyword(userMsg)));
+                : (isStandaloneType ? null
+                        : (isOrderRequest ? extractOrderAwareKeyword(userMsg) : extractKeyword(userMsg)));
         String typeCategory = extractTypeCategory(userMsg);
         int orderLimit = isOrderRequest ? extractOrderResultLimit(userMsg) : DEFAULT_ORDER_RESULT_LIMIT;
 
         List<FileInfo> matchedFiles = isOrderRequest
-            ? selectOrderedFiles(userFiles, typeCategory, keyword, userMsg)
-            : filterFiles(userFiles, keyword, typeCategory, userMsg);
+                ? selectOrderedFiles(userFiles, typeCategory, keyword, userMsg)
+                : filterFiles(userFiles, keyword, typeCategory, userMsg);
         if (matchedFiles.isEmpty()) {
             sendDoneText(emitter, "没有找到匹配条件的文件。你可以换个文件名关键词或类型再试。\n");
             return;
         }
 
-        long totalSize = matchedFiles.stream().mapToLong(file -> file.getFileSize() != null ? file.getFileSize() : 0L).sum();
+        long totalSize = matchedFiles.stream().mapToLong(file -> file.getFileSize() != null ? file.getFileSize() : 0L)
+                .sum();
 
         StringBuilder answer = new StringBuilder();
         answer.append("匹配到 ").append(matchedFiles.size()).append(" 个文件");
@@ -1139,8 +1148,9 @@ public class AiChatService {
         if (RECENT_REQUEST_PATTERN.matcher(userMsg).find()) {
             answer.append("\n最近上传：");
             matchedFiles.stream()
-                    .sorted(Comparator.comparing(FileInfo::getUploadTime, Comparator.nullsLast(Comparator.reverseOrder())))
-                .limit(orderLimit)
+                    .sorted(Comparator.comparing(FileInfo::getUploadTime,
+                            Comparator.nullsLast(Comparator.reverseOrder())))
+                    .limit(orderLimit)
                     .forEach(file -> answer.append("\n- ")
                             .append(file.getOriginalFilename())
                             .append("（").append(formatUploadTime(file)).append("）"));
@@ -1149,18 +1159,20 @@ public class AiChatService {
         if (OLDEST_REQUEST_PATTERN.matcher(userMsg).find()) {
             answer.append("\n\n最早上传的文件：");
             matchedFiles.stream()
-                .sorted(Comparator.comparing(FileInfo::getUploadTime, Comparator.nullsLast(Comparator.naturalOrder())))
-                .limit(orderLimit)
-                .forEach(file -> answer.append("\n- ")
-                    .append(file.getOriginalFilename())
-                    .append("（").append(formatUploadTime(file)).append("）"));
+                    .sorted(Comparator.comparing(FileInfo::getUploadTime,
+                            Comparator.nullsLast(Comparator.naturalOrder())))
+                    .limit(orderLimit)
+                    .forEach(file -> answer.append("\n- ")
+                            .append(file.getOriginalFilename())
+                            .append("（").append(formatUploadTime(file)).append("）"));
         }
 
         if (LARGEST_REQUEST_PATTERN.matcher(userMsg).find()) {
             answer.append("\n\n占用空间最大的文件：");
             matchedFiles.stream()
-                    .sorted(Comparator.comparing(file -> file.getFileSize() != null ? file.getFileSize() : 0L, Comparator.reverseOrder()))
-                .limit(orderLimit)
+                    .sorted(Comparator.comparing(file -> file.getFileSize() != null ? file.getFileSize() : 0L,
+                            Comparator.reverseOrder()))
+                    .limit(orderLimit)
                     .forEach(file -> answer.append("\n- ")
                             .append(file.getOriginalFilename())
                             .append("（").append(formatFileSize(file.getFileSize())).append("）"));
@@ -1169,11 +1181,11 @@ public class AiChatService {
         if (SMALLEST_REQUEST_PATTERN.matcher(userMsg).find()) {
             answer.append("\n\n占用空间最小的文件：");
             matchedFiles.stream()
-                .sorted(Comparator.comparing(file -> file.getFileSize() != null ? file.getFileSize() : 0L))
-                .limit(orderLimit)
-                .forEach(file -> answer.append("\n- ")
-                    .append(file.getOriginalFilename())
-                    .append("（").append(formatFileSize(file.getFileSize())).append("）"));
+                    .sorted(Comparator.comparing(file -> file.getFileSize() != null ? file.getFileSize() : 0L))
+                    .limit(orderLimit)
+                    .forEach(file -> answer.append("\n- ")
+                            .append(file.getOriginalFilename())
+                            .append("（").append(formatFileSize(file.getFileSize())).append("）"));
         }
 
         boolean needDetailList = DETAIL_REQUEST_PATTERN.matcher(userMsg).find() || matchedFiles.size() <= 3;
@@ -1187,7 +1199,8 @@ public class AiChatService {
                         .append(" | ").append(formatCategory(resolveTypeCategory(file)))
                         .append(" | ").append(formatFileSize(file.getFileSize()))
                         .append(" | 上传 ").append(formatUploadTime(file))
-                        .append(" | 下载 ").append(file.getDownloadCount() != null ? file.getDownloadCount() : 0).append(" 次");
+                        .append(" | 下载 ").append(file.getDownloadCount() != null ? file.getDownloadCount() : 0)
+                        .append(" 次");
                 if (file.getDescription() != null && !file.getDescription().isBlank()) {
                     answer.append(" | 描述：").append(file.getDescription());
                 }
@@ -1274,7 +1287,8 @@ public class AiChatService {
         return "偏低";
     }
 
-    private boolean tryHandlePendingDeleteConfirmation(String userMsg, Long userId, SseEmitter emitter) throws Exception {
+    private boolean tryHandlePendingDeleteConfirmation(String userMsg, Long userId, SseEmitter emitter)
+            throws Exception {
         PendingDeleteContext pending = getValidPendingDelete(userId);
         if (pending == null) {
             return false;
@@ -1408,7 +1422,7 @@ public class AiChatService {
         if (size <= 0) {
             return "0 B";
         }
-        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        String[] units = { "B", "KB", "MB", "GB", "TB" };
         double value = size;
         int unitIndex = 0;
         while (value >= 1024 && unitIndex < units.length - 1) {
