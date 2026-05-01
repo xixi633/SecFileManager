@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="chat-page">
     <aside class="chat-sidebar">
       <div class="sidebar-header">
@@ -113,10 +113,8 @@
       </el-tabs>
     </aside>
 
-    <main class="chat-main">
-      <div v-if="!activeSessionId" class="chat-empty">
-        <el-empty description="请选择好友开始聊天" />
-      </div>
+    <main class="chat-main" :style="chatMainStyle">
+      <div v-if="!activeSessionId" class="chat-empty"></div>
 
       <template v-else>
         <div class="chat-header">
@@ -125,6 +123,19 @@
             <div class="chat-title">{{ activeFriendName }}</div>
             <div class="chat-subtitle">实时通道：{{ wsConnected ? '已连接' : '未连接' }}</div>
           </div>
+          <el-dropdown trigger="click" @command="onHeaderCommand">
+            <el-button plain size="small">
+              聊天设置 <el-icon class="el-icon--right"><arrow-down /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="background" :loading="chatBackgroundUploading">聊天背景</el-dropdown-item>
+                <el-dropdown-item command="remark">备注</el-dropdown-item>
+                <el-dropdown-item command="search">查看聊天内容</el-dropdown-item>
+                <el-dropdown-item command="delete" divided>删除聊天记录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
 
         <el-scrollbar ref="messageScrollbarRef" class="message-list">
@@ -174,6 +185,13 @@
             <el-button type="primary" @click="sendText">发送</el-button>
           </div>
           <input ref="fileInputRef" type="file" style="display: none" @change="onFilePicked" />
+          <input
+            ref="chatBackgroundInputRef"
+            type="file"
+            accept="image/png,image/jpeg,image/jpg,image/gif,image/webp"
+            style="display: none"
+            @change="onChatBackgroundPicked"
+          />
         </div>
       </template>
     </main>
@@ -242,6 +260,45 @@
         />
       </div>
     </el-dialog>
+
+    <el-dialog v-model="searchDialogVisible" title="查看聊天内容" width="680px" @close="onSearchDialogClose">
+      <div class="search-dialog-toolbar">
+        <el-input
+          v-model="searchKeywordInput"
+          placeholder="输入关键词搜索聊天记录"
+          clearable
+          @keyup.enter="runSearchMessages"
+          style="flex: 1"
+        >
+          <template #append>
+            <el-button @click="runSearchMessages">搜索</el-button>
+          </template>
+        </el-input>
+        <el-button type="warning" plain @click="runListFiles" style="margin-left: 10px">文件</el-button>
+      </div>
+
+      <div v-loading="searchLoading" class="search-result-area">
+        <template v-if="searchResults.length > 0">
+          <template v-for="group in searchResultGroups" :key="group.date">
+            <div class="search-date-divider">{{ group.date }}</div>
+            <div v-for="item in group.items" :key="item.id" class="search-result-item">
+              <div class="search-result-sender">{{ item.own ? '我' : activeFriendName }}</div>
+              <div class="search-result-body">
+                <template v-if="item.messageType === 'file'">
+                  <span class="search-result-file-icon">📎</span>
+                  {{ item.fileName || '文件' }}
+                  <span v-if="item.fileSize" class="search-result-file-size">({{ formatFileSize(item.fileSize) }})</span>
+                </template>
+                <template v-else>{{ item.content }}</template>
+              </div>
+              <div class="search-result-time">{{ formatTime(item.sentAt) }}</div>
+            </div>
+          </template>
+        </template>
+        <el-empty v-else-if="searchFetched" description="未找到相关内容" :image-size="80" />
+        <el-empty v-else description="输入关键词搜索或点击文件按钮查看" :image-size="80" />
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -249,10 +306,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { ArrowDown } from '@element-plus/icons-vue';
 import api from '../api/index.js';
 import { useUser } from '../composables/useUser.js';
 import {
   acceptFriendRequest,
+  getChatBackground,
   downloadChatFile,
   listFriends,
   listIncomingFriendRequests,
@@ -266,7 +325,11 @@ import {
   sendFileMessage,
   sendFriendRequest,
   sendTextMessage,
-  updateFriendRemark
+  uploadChatBackground,
+  updateChatRemark,
+  deleteChatMessages,
+  searchChatMessages,
+  listChatFileMessages
 } from '../api/chat.js';
 import { fetchFileList } from '../api/file.js';
 import { createFileUploadTask, enqueueUploadTasks, validateUploadFile } from '../store/uploadQueue.js';
@@ -290,6 +353,7 @@ const activeFriend = ref(null);
 const messageInput = ref('');
 const messageScrollbarRef = ref(null);
 const fileInputRef = ref(null);
+const chatBackgroundInputRef = ref(null);
 
 const addDialogVisible = ref(false);
 const searchKeyword = ref('');
@@ -304,10 +368,18 @@ const libraryLoading = ref(false);
 const libraryFiles = ref([]);
 const libraryPagination = ref({ page: 1, size: 8, total: 0 });
 
+const searchDialogVisible = ref(false);
+const searchKeywordInput = ref('');
+const searchLoading = ref(false);
+const searchResults = ref([]);
+const searchFetched = ref(false);
+
 const wsRef = ref(null);
 const wsConnected = ref(false);
 let wsReconnectTimer = null;
 const savingToLibraryMap = ref({});
+const chatBackgroundMap = ref({});
+const chatBackgroundUploading = ref(false);
 
 const { avatarUrl } = useUser('user');
 const avatarVersion = String(Date.now());
@@ -349,11 +421,38 @@ const filteredSessions = computed(() => {
 });
 
 const activeFriendName = computed(() => displayNameOf(activeFriend.value));
+const chatMainStyle = computed(() => {
+  if (!activeSessionId.value) {
+    return {};
+  }
+  const bgUrl = chatBackgroundMap.value[activeSessionId.value];
+  if (!bgUrl) {
+    return {};
+  }
+  return {
+    backgroundImage: `url(${bgUrl})`
+  };
+});
 const activeFriendAvatar = computed(() => {
   if (!activeFriend.value?.friendUserId) {
     return '';
   }
   return avatarByUserId(activeFriend.value.friendUserId);
+});
+
+const searchResultGroups = computed(() => {
+  const groups = [];
+  const map = new Map();
+  for (const item of searchResults.value) {
+    const dateStr = formatDateOnly(item.sentAt);
+    if (!map.has(dateStr)) {
+      const group = { date: dateStr, items: [] };
+      map.set(dateStr, group);
+      groups.push(group);
+    }
+    map.get(dateStr).items.push(item);
+  }
+  return groups;
 });
 
 onMounted(async () => {
@@ -380,6 +479,7 @@ onBeforeUnmount(() => {
     wsRef.value.close();
     wsRef.value = null;
   }
+  revokeAllChatBackgroundUrls();
 });
 
 function displayNameOf(entity) {
@@ -400,6 +500,21 @@ function avatarByUserId(userId) {
   const token = localStorage.getItem('token') || '';
   const base = buildApiBaseUrl();
   return `${base}/user/avatar/${userId}?token=${encodeURIComponent(token)}&v=${avatarVersion}`;
+}
+
+async function loadChatBackground(sessionId) {
+  if (!sessionId) return;
+  revokeChatBackgroundUrl(sessionId);
+  try {
+    const response = await getChatBackground(sessionId);
+    const blob = response?.data;
+    if (!blob || blob.size === 0) {
+      return;
+    }
+    chatBackgroundMap.value[sessionId] = window.URL.createObjectURL(blob);
+  } catch (_) {
+    delete chatBackgroundMap.value[sessionId];
+  }
 }
 
 async function loadFriends() {
@@ -553,13 +668,13 @@ async function openChatByFriend(friend) {
   };
   activeTab.value = 'sessions';
 
-  await Promise.all([loadSessions(), loadMessagesForActiveSession()]);
+  await Promise.all([loadSessions(), loadMessagesForActiveSession(), loadChatBackground(sessionId)]);
 }
 
 async function selectSession(session) {
   activeSessionId.value = session.sessionId;
   activeFriend.value = session;
-  await loadMessagesForActiveSession();
+  await Promise.all([loadMessagesForActiveSession(), loadChatBackground(session.sessionId)]);
 }
 
 async function loadMessagesForActiveSession() {
@@ -782,6 +897,7 @@ async function removeFriendAction(friend) {
   await Promise.all([loadFriends(), loadSessions()]);
 
   if (activeFriend.value?.friendUserId === friend.userId) {
+    revokeChatBackgroundUrl(activeSessionId.value);
     activeSessionId.value = null;
     activeFriend.value = null;
     messages.value = [];
@@ -811,15 +927,155 @@ async function requestAddFriend(user) {
 }
 
 function openRemarkDialog(friend) {
+  const friendUserId = getFriendUserId(friend);
+  if (!friendUserId) {
+    ElMessage.warning('未找到当前好友');
+    return;
+  }
   remarkTargetFriend.value = friend;
-  remarkInput.value = friend.remark || '';
+  remarkInput.value = getFriendRemark(friend);
   remarkDialogVisible.value = true;
 }
 
+function onHeaderCommand(command) {
+  switch (command) {
+    case 'background':
+      pickChatBackground();
+      break;
+    case 'remark':
+      openRemarkDialog(activeFriend.value);
+      break;
+    case 'search':
+      openSearchDialog();
+      break;
+    case 'delete':
+      confirmDeleteMessages();
+      break;
+  }
+}
+
+async function confirmDeleteMessages() {
+  if (!activeSessionId.value) {
+    ElMessage.warning('请先选择会话');
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认删除与「${activeFriendName.value}」的所有聊天记录吗？此操作不可恢复。`,
+      '删除聊天记录',
+      { type: 'warning', confirmButtonText: '确定删除', cancelButtonText: '取消' }
+    );
+  } catch (_) {
+    return;
+  }
+  try {
+    await deleteChatMessages(activeSessionId.value);
+    messages.value = [];
+    await loadSessions();
+    ElMessage.success('聊天记录已删除');
+  } catch (_) {
+    ElMessage.error('删除聊天记录失败');
+  }
+}
+
+function openSearchDialog() {
+  if (!activeSessionId.value) {
+    ElMessage.warning('请先选择会话');
+    return;
+  }
+  searchKeywordInput.value = '';
+  searchResults.value = [];
+  searchFetched.value = false;
+  searchDialogVisible.value = true;
+}
+
+function onSearchDialogClose() {
+  searchResults.value = [];
+  searchFetched.value = false;
+  searchKeywordInput.value = '';
+}
+
+async function runSearchMessages() {
+  const keyword = searchKeywordInput.value.trim();
+  if (!keyword) {
+    ElMessage.warning('请输入搜索关键词');
+    return;
+  }
+  searchLoading.value = true;
+  try {
+    const res = await searchChatMessages(activeSessionId.value, keyword);
+    searchResults.value = res?.data?.data || [];
+    searchFetched.value = true;
+  } catch (_) {
+    ElMessage.error('搜索失败');
+    searchResults.value = [];
+    searchFetched.value = true;
+  } finally {
+    searchLoading.value = false;
+  }
+}
+
+async function runListFiles() {
+  searchLoading.value = true;
+  try {
+    const res = await listChatFileMessages(activeSessionId.value);
+    searchResults.value = res?.data?.data || [];
+    searchFetched.value = true;
+  } catch (_) {
+    ElMessage.error('获取文件列表失败');
+    searchResults.value = [];
+    searchFetched.value = true;
+  } finally {
+    searchLoading.value = false;
+  }
+}
+
+function formatDateOnly(time) {
+  if (!time) return '未知日期';
+  const date = new Date(time);
+  if (Number.isNaN(date.getTime())) return String(time);
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function pickChatBackground() {
+  if (!activeSessionId.value) {
+    ElMessage.warning('请先选择会话');
+    return;
+  }
+  chatBackgroundInputRef.value?.click();
+}
+
+async function onChatBackgroundPicked(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  try {
+    if (!validateChatBackgroundFile(file)) {
+      return;
+    }
+
+    chatBackgroundUploading.value = true;
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('sessionId', activeSessionId.value);
+    await uploadChatBackground(formData);
+    await loadChatBackground(activeSessionId.value);
+    ElMessage.success('聊天背景已更新');
+  } finally {
+    chatBackgroundUploading.value = false;
+    event.target.value = '';
+  }
+}
+
 async function saveRemark() {
-  if (!remarkTargetFriend.value?.userId) return;
-  await updateFriendRemark(remarkTargetFriend.value.userId, remarkInput.value || '');
+  const friendUserId = getFriendUserId(remarkTargetFriend.value);
+  if (!friendUserId) return;
+  await updateChatRemark(friendUserId, remarkInput.value || '');
   remarkDialogVisible.value = false;
+  syncRemarkToActiveFriend(friendUserId, remarkInput.value || '');
   ElMessage.success('备注已更新');
   await Promise.all([loadFriends(), loadSessions()]);
 }
@@ -930,39 +1186,96 @@ function extractFilename(contentDisposition) {
   const normalMatch = contentDisposition.match(/filename="?([^\";]+)"?/i);
   return normalMatch?.[1] || '';
 }
+
+function validateChatBackgroundFile(file) {
+  const isImage = String(file?.type || '').startsWith('image/');
+  if (!isImage) {
+    ElMessage.warning('只能上传图片文件');
+    return false;
+  }
+  const isLt5M = Number(file?.size || 0) / 1024 / 1024 < 5;
+  if (!isLt5M) {
+    ElMessage.warning('聊天背景图片不能超过5MB');
+    return false;
+  }
+  return true;
+}
+
+function revokeChatBackgroundUrl(sessionId) {
+  const url = chatBackgroundMap.value[sessionId];
+  if (!url) {
+    return;
+  }
+  window.URL.revokeObjectURL(url);
+  delete chatBackgroundMap.value[sessionId];
+}
+
+function revokeAllChatBackgroundUrls() {
+  for (const sessionId of Object.keys(chatBackgroundMap.value)) {
+    const url = chatBackgroundMap.value[sessionId];
+    if (url) {
+      window.URL.revokeObjectURL(url);
+    }
+  }
+  chatBackgroundMap.value = {};
+}
+
+function getFriendUserId(entity) {
+  return entity?.userId || entity?.friendUserId || null;
+}
+
+function getFriendRemark(entity) {
+  return entity?.remark || entity?.friendRemark || '';
+}
+
+function syncRemarkToActiveFriend(friendUserId, remark) {
+  const normalizedRemark = (remark || '').trim();
+  const nextRemark = normalizedRemark || null;
+
+  if (activeFriend.value && getFriendUserId(activeFriend.value) === friendUserId) {
+    activeFriend.value = {
+      ...activeFriend.value,
+      remark: nextRemark,
+      friendRemark: nextRemark
+    };
+  }
+}
 </script>
 
 <style scoped>
 .chat-page {
   display: flex;
   height: calc(100vh - 140px);
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: hidden;
   background: #ffffff;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
 }
 
 .chat-sidebar {
-  width: 360px;
-  border-right: 1px solid #eef0f3;
-  background: #fcfdff;
+  width: 340px;
+  border-right: 1px solid #f0f2f5;
+  background: #fafbfc;
 }
 
 .sidebar-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 16px;
-  border-bottom: 1px solid #eef0f3;
+  padding: 18px 16px;
+  border-bottom: 1px solid #f0f2f5;
 }
 
 .sidebar-header h3 {
   margin: 0;
-  font-size: 18px;
+  font-size: 17px;
+  font-weight: 600;
+  color: #1a1a2e;
+  letter-spacing: 0.3px;
 }
 
 .chat-tabs {
-  padding: 0 12px;
+  padding: 0 10px;
 }
 
 .tab-toolbar {
@@ -976,7 +1289,7 @@ function extractFilename(contentDisposition) {
 
 .request-summary {
   font-size: 12px;
-  color: #7a8599;
+  color: #8c8c9a;
 }
 
 .session-item,
@@ -986,9 +1299,9 @@ function extractFilename(contentDisposition) {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border-radius: 8px;
-  margin: 6px 2px;
-  transition: background 0.2s ease;
+  border-radius: 10px;
+  margin: 4px 2px;
+  transition: all 0.2s ease;
 }
 
 .session-item {
@@ -998,11 +1311,11 @@ function extractFilename(contentDisposition) {
 .session-item:hover,
 .friend-item:hover,
 .request-item:hover {
-  background: #f4f7ff;
+  background: rgba(64, 158, 255, 0.06);
 }
 
 .session-item.active {
-  background: #e8f3ff;
+  background: rgba(64, 158, 255, 0.1);
 }
 
 .session-main,
@@ -1010,12 +1323,14 @@ function extractFilename(contentDisposition) {
 .request-text {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .session-actions {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .session-pin-btn {
@@ -1026,7 +1341,8 @@ function extractFilename(contentDisposition) {
 .friend-name,
 .request-name {
   font-weight: 600;
-  color: #1f2d3d;
+  font-size: 14px;
+  color: #1a1a2e;
 }
 
 .session-preview,
@@ -1034,8 +1350,8 @@ function extractFilename(contentDisposition) {
 .request-message,
 .request-status {
   font-size: 12px;
-  color: #7a8599;
-  margin-top: 2px;
+  color: #8c8c9a;
+  margin-top: 3px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1050,7 +1366,12 @@ function extractFilename(contentDisposition) {
   flex: 1;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, #f9fbff 0%, #f4f7fb 100%);
+  background: linear-gradient(180deg, #f8f9fc 0%, #f2f4f8 100%);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  position: relative;
+  isolation: isolate;
 }
 
 .chat-empty {
@@ -1061,40 +1382,47 @@ function extractFilename(contentDisposition) {
 }
 
 .chat-header {
-  padding: 14px 18px;
-  border-bottom: 1px solid #e7ebf3;
-  background: #ffffff;
+  padding: 14px 20px;
+  border-bottom: 1px solid #f0f2f5;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  position: relative;
+  z-index: 1;
 }
 
 .chat-header-text {
   min-width: 0;
+  flex: 1;
 }
 
 .chat-title {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 600;
-  color: #1f2d3d;
+  color: #1a1a2e;
 }
 
 .chat-subtitle {
   margin-top: 2px;
   font-size: 12px;
-  color: #7b8796;
+  color: #8c8c9a;
 }
 
 .message-list {
   flex: 1;
-  padding: 16px;
+  padding: 20px 24px;
+  position: relative;
+  z-index: 1;
 }
 
 .message-row {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .message-row.own {
@@ -1106,27 +1434,34 @@ function extractFilename(contentDisposition) {
 }
 
 .message-bubble {
-  max-width: 70%;
+  max-width: 65%;
   background: #ffffff;
-  border-radius: 10px;
-  padding: 10px 12px;
-  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.08);
+  border-radius: 14px 14px 14px 4px;
+  padding: 10px 14px;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.06);
+  transition: box-shadow 0.2s ease;
+}
+
+.message-bubble:hover {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
 }
 
 .message-bubble.own {
-  background: #dff3ff;
+  background: #e8f4fd;
+  border-radius: 14px 14px 4px 14px;
 }
 
 .message-text {
   white-space: pre-wrap;
-  line-height: 1.55;
-  color: #263447;
+  line-height: 1.6;
+  color: #1a1a2e;
+  font-size: 14px;
 }
 
 .message-time {
   margin-top: 6px;
-  font-size: 12px;
-  color: #7f8a9b;
+  font-size: 11px;
+  color: #a0a4b0;
   text-align: right;
 }
 
@@ -1136,13 +1471,14 @@ function extractFilename(contentDisposition) {
 
 .file-title {
   font-weight: 600;
-  color: #1f2d3d;
+  color: #1a1a2e;
+  font-size: 14px;
 }
 
 .file-size {
-  margin: 4px 0 8px;
+  margin: 4px 0 10px;
   font-size: 12px;
-  color: #7f8a9b;
+  color: #8c8c9a;
 }
 
 .file-actions {
@@ -1152,9 +1488,13 @@ function extractFilename(contentDisposition) {
 }
 
 .chat-input-bar {
-  background: #ffffff;
-  border-top: 1px solid #e7ebf3;
-  padding: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid #f0f2f5;
+  padding: 14px 20px;
+  position: relative;
+  z-index: 1;
 }
 
 .chat-input-actions {
@@ -1180,9 +1520,14 @@ function extractFilename(contentDisposition) {
   justify-content: space-between;
   align-items: center;
   padding: 10px;
-  border: 1px solid #edf0f6;
-  border-radius: 8px;
+  border: 1px solid #f0f2f5;
+  border-radius: 10px;
   margin-bottom: 8px;
+  transition: background 0.15s ease;
+}
+
+.search-result-item:hover {
+  background: rgba(64, 158, 255, 0.04);
 }
 
 .search-result-left {
@@ -1193,19 +1538,87 @@ function extractFilename(contentDisposition) {
 
 .search-result-item .name {
   font-weight: 600;
-  color: #1f2d3d;
+  color: #1a1a2e;
 }
 
 .search-result-item .username {
   margin-top: 2px;
   font-size: 12px;
-  color: #7f8a9b;
+  color: #8c8c9a;
 }
 
 .library-pagination {
   margin-top: 12px;
   display: flex;
   justify-content: flex-end;
+}
+
+.search-dialog-toolbar {
+  display: flex;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.search-result-area {
+  max-height: 460px;
+  overflow-y: auto;
+}
+
+.search-date-divider {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8f9fc;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #8c8c9a;
+  border-bottom: 1px solid #f0f2f5;
+  letter-spacing: 0.5px;
+}
+
+.search-result-item {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f5f6f8;
+  transition: background 0.15s ease;
+}
+
+.search-result-item:hover {
+  background: rgba(64, 158, 255, 0.04);
+}
+
+.search-result-item:last-child {
+  border-bottom: none;
+}
+
+.search-result-sender {
+  font-size: 13px;
+  font-weight: 600;
+  color: #409eff;
+  margin-bottom: 4px;
+}
+
+.search-result-body {
+  font-size: 14px;
+  color: #1a1a2e;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.search-result-file-icon {
+  margin-right: 4px;
+}
+
+.search-result-file-size {
+  font-size: 12px;
+  color: #8c8c9a;
+  margin-left: 4px;
+}
+
+.search-result-time {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #a0a4b0;
 }
 
 @media (max-width: 980px) {
@@ -1218,7 +1631,7 @@ function extractFilename(contentDisposition) {
   .chat-sidebar {
     width: 100%;
     border-right: none;
-    border-bottom: 1px solid #eef0f3;
+    border-bottom: 1px solid #f0f2f5;
   }
 
   .chat-main {
