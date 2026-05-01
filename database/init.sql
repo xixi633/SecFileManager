@@ -37,6 +37,7 @@ CREATE TABLE t_user (
     email VARCHAR(100) COMMENT '邮箱',
     nickname VARCHAR(50) COMMENT '昵称',
     avatar_path VARCHAR(512) COMMENT '头像存储路径',
+    chat_background_path VARCHAR(512) COMMENT '聊天背景图存储路径', -- 合并自 migration_add_chat_background.sql
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '注册时间',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     status TINYINT NOT NULL DEFAULT 1 COMMENT '状态：0-禁用 1-正常',

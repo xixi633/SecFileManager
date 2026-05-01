@@ -71,6 +71,12 @@ public class User {
      * 头像存储路径
      */
     private String avatarPath;
+
+    /**
+     * 聊天背景图存储路径
+     */
+    @TableField(exist = false)
+    private String chatBackgroundPath;
     
     /**
      * 注册时间

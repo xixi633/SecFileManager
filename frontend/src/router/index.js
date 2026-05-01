@@ -8,6 +8,8 @@ import AdminPanel from "../views/AdminPanel.vue";
 import RecycleBin from "../views/RecycleBin.vue";
 import Chat from "../views/Chat.vue";
 import About from "../views/About.vue";
+import Games from "../views/Games.vue";
+import SnakeGame from "../views/SnakeGame.vue";
 
 const routes = [
   { path: "/", redirect: "/files" },
@@ -20,6 +22,8 @@ const routes = [
     children: [
       { path: "files", name: "Files", component: FileList },
       { path: "recycle", name: "Recycle", component: RecycleBin },
+      { path: "game", name: "Games", component: Games },
+      { path: "game/snake", name: "SnakeGame", component: SnakeGame },
       { path: "settings", name: "Settings", component: UserSettings },
       { path: "security", name: "Security", component: SecurityInfo },
       { path: "chat", name: "Chat", component: Chat }

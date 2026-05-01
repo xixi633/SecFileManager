@@ -32,6 +32,20 @@ export function updateFriendRemark(friendUserId, remark) {
   return api.put(`/friend/${friendUserId}/remark`, { remark });
 }
 
+export function updateChatRemark(friendUserId, remark) {
+  return api.put(`/chat/session/${friendUserId}/remark`, { remark });
+}
+
+export function uploadChatBackground(formData) {
+  return api.post('/chat/background', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  });
+}
+
+export function getChatBackground(sessionId) {
+  return api.get('/chat/background', { params: { sessionId }, responseType: 'blob' });
+}
+
 export function openSession(friendUserId) {
   return api.get(`/chat/session/${friendUserId}`);
 }
@@ -62,4 +76,16 @@ export function unreadCount() {
 
 export function downloadChatFile(messageId) {
   return api.get(`/chat/file/download/${messageId}`, { responseType: 'blob' });
+}
+
+export function deleteChatMessages(sessionId) {
+  return api.delete(`/chat/messages/${sessionId}`);
+}
+
+export function searchChatMessages(sessionId, keyword) {
+  return api.get(`/chat/messages/${sessionId}/search`, { params: { keyword } });
+}
+
+export function listChatFileMessages(sessionId) {
+  return api.get(`/chat/messages/${sessionId}/files`);
 }

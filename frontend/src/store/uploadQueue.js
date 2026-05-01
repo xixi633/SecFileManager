@@ -18,12 +18,14 @@ import {
 } from './uploadState.js';
 import { addUploadFailureNotification } from './messageCenter.js';
 
-const LARGE_FILE_THRESHOLD = 32 * 1024 * 1024;
-const LARGE_FILE_CHUNK_SIZE = 16 * 1024 * 1024;
-const MAX_CHUNK_UPLOAD_CONCURRENCY = 8;
-const DEFAULT_CHUNK_UPLOAD_CONCURRENCY = 6;
-const LOW_CORE_CHUNK_UPLOAD_CONCURRENCY = 4;
-const MEDIUM_NETWORK_CHUNK_UPLOAD_CONCURRENCY = 4;
+const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
+const BASE_CHUNK_SIZE = 32 * 1024 * 1024;
+const MEDIUM_CHUNK_SIZE = 64 * 1024 * 1024;
+const LARGE_CHUNK_SIZE = 128 * 1024 * 1024;
+const MAX_CHUNK_UPLOAD_CONCURRENCY = 4;
+const DEFAULT_CHUNK_UPLOAD_CONCURRENCY = 4;
+const LOW_CORE_CHUNK_UPLOAD_CONCURRENCY = 3;
+const MEDIUM_NETWORK_CHUNK_UPLOAD_CONCURRENCY = 3;
 const SLOW_NETWORK_CHUNK_UPLOAD_CONCURRENCY = 2;
 const PROGRESS_UPDATE_INTERVAL_MS = 80;
 
@@ -192,7 +194,24 @@ const isCanceledError = (error) => error?.name === 'CanceledError'
 
 const createUploadIdentifier = (file) => `${file.name}__${file.size}__${file.lastModified}`;
 
-const resolveChunkUploadConcurrency = (totalChunks) => {
+const resolveChunkSize = (fileSize) => {
+  if (!fileSize || Number.isNaN(fileSize)) return BASE_CHUNK_SIZE;
+
+  const connection = typeof navigator !== 'undefined'
+    ? navigator.connection
+    : null;
+  const downlink = connection ? Number(connection.downlink || 0) : 0;
+
+  if (downlink > 0 && downlink < 5) {
+    return BASE_CHUNK_SIZE;
+  }
+
+  if (fileSize >= 8 * 1024 * 1024 * 1024) return LARGE_CHUNK_SIZE;
+  if (fileSize >= 1024 * 1024 * 1024) return MEDIUM_CHUNK_SIZE;
+  return BASE_CHUNK_SIZE;
+};
+
+const resolveChunkUploadConcurrency = (totalChunks, chunkSize) => {
   if (totalChunks <= 1) return 1;
 
   const connectionType = typeof navigator !== 'undefined'
@@ -206,6 +225,15 @@ const resolveChunkUploadConcurrency = (totalChunks) => {
     concurrency = Math.min(concurrency, MEDIUM_NETWORK_CHUNK_UPLOAD_CONCURRENCY);
   }
 
+  const downlink = typeof navigator !== 'undefined'
+    ? Number(navigator.connection?.downlink || 0)
+    : 0;
+  if (downlink >= 20) {
+    concurrency = MAX_CHUNK_UPLOAD_CONCURRENCY;
+  } else if (downlink > 0 && downlink < 5) {
+    concurrency = Math.min(concurrency, MEDIUM_NETWORK_CHUNK_UPLOAD_CONCURRENCY);
+  }
+
   const hardwareConcurrency = typeof navigator !== 'undefined'
     ? Number(navigator.hardwareConcurrency || 0)
     : 0;
@@ -214,6 +242,12 @@ const resolveChunkUploadConcurrency = (totalChunks) => {
     concurrency = MAX_CHUNK_UPLOAD_CONCURRENCY;
   } else if (hardwareConcurrency > 0 && hardwareConcurrency <= 4) {
     concurrency = Math.min(concurrency, LOW_CORE_CHUNK_UPLOAD_CONCURRENCY);
+  }
+
+  if (chunkSize >= LARGE_CHUNK_SIZE) {
+    concurrency = Math.min(concurrency, LOW_CORE_CHUNK_UPLOAD_CONCURRENCY);
+  } else if (chunkSize >= MEDIUM_CHUNK_SIZE) {
+    concurrency = Math.min(concurrency, DEFAULT_CHUNK_UPLOAD_CONCURRENCY);
   }
 
   return Math.max(1, Math.min(concurrency, MAX_CHUNK_UPLOAD_CONCURRENCY, totalChunks));
@@ -246,8 +280,9 @@ const runFileUploadTask = async (task) => {
 
   const identifier = createUploadIdentifier(file);
   task.identifier = identifier;
-  const totalChunks = Math.ceil(file.size / LARGE_FILE_CHUNK_SIZE);
-  const chunkUploadConcurrency = resolveChunkUploadConcurrency(totalChunks);
+  const chunkSize = resolveChunkSize(file.size);
+  const totalChunks = Math.ceil(file.size / chunkSize);
+  const chunkUploadConcurrency = resolveChunkUploadConcurrency(totalChunks, chunkSize);
 
   let startChunkNumber = 0;
   try {
@@ -260,7 +295,7 @@ const runFileUploadTask = async (task) => {
     startChunkNumber = 0;
   }
 
-  const resumedBytes = Math.min(file.size, startChunkNumber * LARGE_FILE_CHUNK_SIZE);
+  const resumedBytes = Math.min(file.size, startChunkNumber * chunkSize);
   const chunkProgress = new Map();
   let uploadedBytes = resumedBytes;
   let lastProgressUpdateAt = 0;
@@ -289,14 +324,14 @@ const runFileUploadTask = async (task) => {
       throw new Error('UPLOAD_CANCELED');
     }
 
-    const start = chunkNumber * LARGE_FILE_CHUNK_SIZE;
-    const end = Math.min(start + LARGE_FILE_CHUNK_SIZE, file.size);
+    const start = chunkNumber * chunkSize;
+    const end = Math.min(start + chunkSize, file.size);
     const chunk = file.slice(start, end);
 
     const formData = new FormData();
     formData.append('file', chunk);
     formData.append('chunkNumber', chunkNumber);
-    formData.append('chunkSize', LARGE_FILE_CHUNK_SIZE);
+    formData.append('chunkSize', chunkSize);
     formData.append('currentChunkSize', chunk.size);
     formData.append('totalSize', file.size);
     formData.append('identifier', identifier);
