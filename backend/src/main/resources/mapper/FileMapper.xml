@@ -1,0 +1,287 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" 
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.security.filemanager.mapper.FileMapper">
+
+    <sql id="TypeCategoryFilter">
+        <if test="typeCategory != null and typeCategory != '' and typeCategory != 'all'">
+            <choose>
+                <when test="typeCategory == 'folder'">
+                    AND is_folder = 1
+                </when>
+                <when test="typeCategory == 'image'">
+                    AND (file_type LIKE 'image/%'
+                    OR LOWER(SUBSTRING_INDEX(original_filename, '.', -1)) IN ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'))
+                </when>
+                <when test="typeCategory == 'video'">
+                    AND (file_type LIKE 'video/%'
+                    OR LOWER(SUBSTRING_INDEX(original_filename, '.', -1)) IN ('mp4', 'avi', 'mov', 'wmv', 'mkv', 'webm', 'm4v'))
+                </when>
+                <when test="typeCategory == 'audio'">
+                    AND (file_type LIKE 'audio/%'
+                    OR LOWER(SUBSTRING_INDEX(original_filename, '.', -1)) IN ('mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a'))
+                </when>
+                <when test="typeCategory == 'text'">
+                    AND (file_type LIKE 'text/%'
+                    OR LOWER(SUBSTRING_INDEX(original_filename, '.', -1)) IN ('txt', 'md', 'rtf', 'log', 'ini', 'conf', 'yaml', 'yml', 'json', 'xml'))
+                </when>
+                <when test="typeCategory == 'code'">
+                    AND LOWER(SUBSTRING_INDEX(original_filename, '.', -1)) IN
+                    ('java', 'js', 'ts', 'jsx', 'tsx', 'py', 'go', 'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'rb', 'rs', 'kt', 'swift', 'vue', 'html', 'css', 'scss', 'sql', 'sh', 'bat', 'ps1')
+                </when>
+                <when test="typeCategory == 'archive'">
+                    AND (file_type IN ('application/zip', 'application/x-zip-compressed', 'application/x-rar-compressed', 'application/x-7z-compressed', 'application/gzip')
+                    OR LOWER(SUBSTRING_INDEX(original_filename, '.', -1)) IN ('zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'))
+                </when>
+                <when test="typeCategory == 'document'">
+                    AND (file_type IN ('application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
+                    OR LOWER(SUBSTRING_INDEX(original_filename, '.', -1)) IN ('pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'csv'))
+                </when>
+                <when test="typeCategory == 'other'">
+                    AND is_folder = 0
+                    AND NOT (
+                        file_type LIKE 'image/%'
+                        OR file_type LIKE 'video/%'
+                        OR file_type LIKE 'audio/%'
+                        OR file_type LIKE 'text/%'
+                        OR LOWER(SUBSTRING_INDEX(original_filename, '.', -1)) IN
+                        ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg',
+                        'mp4', 'avi', 'mov', 'wmv', 'mkv', 'webm', 'm4v',
+                        'mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a',
+                        'txt', 'md', 'rtf', 'log', 'ini', 'conf', 'yaml', 'yml', 'json', 'xml',
+                        'java', 'js', 'ts', 'jsx', 'tsx', 'py', 'go', 'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'rb', 'rs', 'kt', 'swift', 'vue', 'html', 'css', 'scss', 'sql', 'sh', 'bat', 'ps1',
+                        'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz',
+                        'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'csv')
+                    )
+                </when>
+            </choose>
+        </if>
+    </sql>
+    
+    <!-- 结果映射 -->
+    <resultMap id="BaseResultMap" type="com.security.filemanager.entity.FileInfo">
+        <id column="id" property="id"/>
+        <result column="user_id" property="userId"/>
+        <result column="original_filename" property="originalFilename"/>
+        <result column="file_size" property="fileSize"/>
+        <result column="file_type" property="fileType"/>
+        <result column="storage_path" property="storagePath"/>
+        <result column="encrypted_size" property="encryptedSize"/>
+        <result column="encrypted_file_key" property="encryptedFileKey"/>
+        <result column="iv" property="iv"/>
+        <result column="auth_tag" property="authTag"/>
+        <result column="file_hash" property="fileHash"/>
+        <result column="upload_time" property="uploadTime"/>
+        <result column="last_download_time" property="lastDownloadTime"/>
+        <result column="download_count" property="downloadCount"/>
+        <result column="description" property="description"/>
+        <result column="is_folder" property="isFolder"/>
+        <result column="deleted" property="deleted"/>
+    </resultMap>
+    
+    <!-- 查询用户的文件列表 -->
+    <!-- 【安全】WHERE条件必须包含user_id，实现用户隔离 -->
+    <select id="selectByUserId" resultMap="BaseResultMap">
+        SELECT id, user_id, original_filename, file_size, file_type,
+               storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+               file_hash, upload_time, last_download_time, download_count, description, is_folder
+                FROM t_file
+                WHERE user_id = #{userId}
+                    AND deleted = 0
+        ORDER BY upload_time DESC
+    </select>
+    
+    <!-- 分页查询用户的文件列表 -->
+    <!-- 【安全】WHERE条件必须包含user_id，实现用户隔离 -->
+    <select id="selectPageByUserId" resultMap="BaseResultMap">
+        SELECT id, user_id, original_filename, file_size, file_type,
+               storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+               file_hash, upload_time, last_download_time, download_count, description, is_folder
+                FROM t_file
+                WHERE user_id = #{userId}
+                    AND deleted = 0
+        ORDER BY upload_time DESC
+    </select>
+
+    <!-- 分页查询用户文件（支持名称/描述/关键词） -->
+    <select id="selectPageByUserIdWithFilters" resultMap="BaseResultMap">
+        SELECT id, user_id, original_filename, file_size, file_type,
+               storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+               file_hash, upload_time, last_download_time, download_count, description, is_folder
+        FROM t_file
+        <where>
+            user_id = #{userId}
+            AND deleted = 0
+            <if test="fileName != null and fileName != ''">
+                AND original_filename LIKE CONCAT('%', #{fileName}, '%')
+            </if>
+            <if test="description != null and description != ''">
+                AND description LIKE CONCAT('%', #{description}, '%')
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (original_filename LIKE CONCAT('%', #{keyword}, '%')
+                OR description LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+            <include refid="TypeCategoryFilter"/>
+        </where>
+        ORDER BY upload_time DESC
+    </select>
+
+    <select id="selectPageForAdmin" resultMap="BaseResultMap">
+        SELECT id, user_id, original_filename, file_size, file_type,
+               storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+               file_hash, upload_time, last_download_time, download_count, description, is_folder
+        FROM t_file
+        <where>
+            deleted = 0
+            <if test="userId != null">
+                AND user_id = #{userId}
+            </if>
+            <if test="fileName != null and fileName != ''">
+                AND original_filename LIKE CONCAT('%', #{fileName}, '%')
+            </if>
+            <include refid="TypeCategoryFilter"/>
+        </where>
+        ORDER BY upload_time DESC
+    </select>
+    
+    <!-- 查询用户的指定文件 -->
+    <!-- 【安全】WHERE条件同时包含file_id和user_id，防止越权访问 -->
+    <select id="selectByIdAndUserId" resultMap="BaseResultMap">
+        SELECT id, user_id, original_filename, file_size, file_type,
+               storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+               file_hash, upload_time, last_download_time, download_count, description, is_folder
+                FROM t_file
+                WHERE id = #{fileId}
+                    AND user_id = #{userId}
+                    AND deleted = 0
+    </select>
+
+        <!-- 查询用户回收站文件列表 -->
+        <select id="selectDeletedByUserId" resultMap="BaseResultMap">
+                SELECT id, user_id, original_filename, file_size, file_type,
+                             storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+                             file_hash, upload_time, last_download_time, download_count, description, is_folder, deleted
+                FROM t_file
+                WHERE user_id = #{userId}
+                    AND deleted = 1
+                ORDER BY upload_time DESC
+        </select>
+
+        <!-- 分页查询用户回收站文件列表 -->
+        <select id="selectPageDeletedByUserId" resultMap="BaseResultMap">
+                SELECT id, user_id, original_filename, file_size, file_type,
+                             storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+                             file_hash, upload_time, last_download_time, download_count, description, is_folder, deleted
+                FROM t_file
+                WHERE user_id = #{userId}
+                    AND deleted = 1
+                ORDER BY upload_time DESC
+        </select>
+
+        <select id="selectPageDeletedByUserIdWithFilter" resultMap="BaseResultMap">
+            SELECT id, user_id, original_filename, file_size, file_type,
+                     storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+                     file_hash, upload_time, last_download_time, download_count, description, is_folder, deleted
+            FROM t_file
+            <where>
+                user_id = #{userId}
+                AND deleted = 1
+                <include refid="TypeCategoryFilter"/>
+            </where>
+            ORDER BY upload_time DESC
+        </select>
+
+            <!-- 管理员分页查询回收站文件（忽略逻辑删除） -->
+            <select id="selectPageDeletedForAdmin" resultMap="BaseResultMap">
+                    SELECT id, user_id, original_filename, file_size, file_type,
+                                 storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+                                 file_hash, upload_time, last_download_time, download_count, description, is_folder, deleted
+                    FROM t_file
+                    <where>
+                        deleted = 1
+                        <if test="userId != null">
+                            AND user_id = #{userId}
+                        </if>
+                        <if test="fileName != null and fileName != ''">
+                            AND original_filename LIKE CONCAT('%', #{fileName}, '%')
+                        </if>
+                        <include refid="TypeCategoryFilter"/>
+                    </where>
+                    ORDER BY upload_time DESC
+            </select>
+
+            <!-- 管理员查询回收站中的指定文件（忽略逻辑删除） -->
+            <select id="selectDeletedByIdForAdmin" resultMap="BaseResultMap">
+                    SELECT id, user_id, original_filename, file_size, file_type,
+                                 storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+                                 file_hash, upload_time, last_download_time, download_count, description, is_folder, deleted
+                    FROM t_file
+                    WHERE id = #{fileId}
+                        AND deleted = 1
+            </select>
+
+        <!-- 查询用户所有文件（包含已删除） -->
+        <select id="selectAllByUserId" resultMap="BaseResultMap">
+                SELECT id, user_id, original_filename, file_size, file_type,
+                             storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+                             file_hash, upload_time, last_download_time, download_count, description, is_folder, deleted
+                FROM t_file
+                WHERE user_id = #{userId}
+                ORDER BY upload_time DESC
+        </select>
+
+        <!-- 还原文件 -->
+        <update id="restoreByIdAndUserId">
+                UPDATE t_file
+                SET deleted = 0
+                WHERE id = #{fileId}
+                    AND user_id = #{userId}
+        </update>
+
+        <!-- 物理删除文件记录 -->
+        <delete id="deletePhysicalByIdAndUserId">
+                DELETE FROM t_file
+                WHERE id = #{fileId}
+                    AND user_id = #{userId}
+        </delete>
+
+    <!-- 查询用户回收站中的指定文件 -->
+    <select id="selectDeletedByIdAndUserId" resultMap="BaseResultMap">
+        SELECT id, user_id, original_filename, file_size, file_type,
+               storage_path, encrypted_size, encrypted_file_key, iv, auth_tag,
+               file_hash, upload_time, last_download_time, download_count, description, is_folder, deleted
+        FROM t_file
+        WHERE id = #{fileId}
+            AND user_id = #{userId}
+            AND deleted = 1
+    </select>
+    
+    <!-- 更新下载信息 -->
+    <update id="updateDownloadInfo">
+        UPDATE t_file
+        SET download_count = download_count + 1,
+            last_download_time = NOW()
+        WHERE id = #{fileId}
+    </update>
+
+    <!-- 文件总大小统计 -->
+    <select id="selectTotalFileSize" resultType="java.lang.Long">
+        SELECT COALESCE(SUM(file_size), 0)
+        FROM t_file
+        WHERE deleted = 0
+    </select>
+
+    <!-- 文件类型分布统计 -->
+    <select id="selectFileTypeDistribution" resultType="java.util.Map">
+        SELECT file_type AS fileType,
+               COUNT(*) AS count
+        FROM t_file
+         WHERE deleted = 0
+        GROUP BY file_type
+    </select>
+    
+</mapper>

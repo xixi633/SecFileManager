@@ -1,0 +1,156 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+  # 增加连接超时时间，支持大文件处理
+  connection-timeout: 180000  # 3分钟
+  
+  # Tomcat配置
+  tomcat:
+    max-http-form-post-size: -1  # 禁用POST大小限制
+    connection-timeout: 180000  # 3分钟
+    threads:
+      max: 200
+      min-spare: 10
+
+spring:
+  application:
+    name: secure-file-manager
+  
+  # 新增：解决Spring Boot 2.6.x与Knife4j/Swagger兼容问题的核心配置
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
+
+  # 数据源配置
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/secure_file_manager?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+
+    # Druid 连接池配置
+    druid:
+      initial-size: 5
+      min-idle: 5
+      max-active: 20
+      max-wait: 60000
+      time-between-eviction-runs-millis: 60000
+      min-evictable-idle-time-millis: 300000
+      validation-query: SELECT 1
+      test-while-idle: true
+      test-on-borrow: false
+      test-on-return: false
+      pool-prepared-statements: false
+
+  # 文件上传配置
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: -1
+      max-request-size: -1
+      file-size-threshold: 32MB
+
+  # Jackson 配置
+  jackson:
+    time-zone: GMT+8
+    date-format: yyyy-MM-dd HH:mm:ss
+
+  # SMTP服务配置
+  mail:
+    host: smtp.qq.com
+    port: 465
+    username: 2284641493@qq.com
+    password: afhumznleiyhebid
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.ssl.enable: true
+      mail.smtp.starttls.enable: true
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+
+# MyBatis-Plus 配置
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.security.filemanager.entity
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# Knife4j 配置
+knife4j:
+  enable: true
+  production: false
+
+# 自定义配置
+secure-file:
+  # 文件存储根目录（生产环境应配置为绝对路径）
+  storage-root: D:/projects/SecFileManager/storage
+
+  # 大文件上传阈值（超过该大小启用分块加密）
+  upload:
+    large-file-threshold: 52428800  # 50MB
+    chunk-size: 16777216            # 16MB
+    session-timeout-ms: 900000      # 15分钟上传会话超时
+    session-cleanup-interval-ms: 60000 # 1分钟清理一次
+
+  # 大文件预览配置
+  preview:
+    large-file-threshold: 2147483648  # 2GB（超过不支持在线预览）
+    small-file-threshold: 536870912   # 512MB（小文件完整加载）
+    partial-preview-size: 1048576     # 1MB（大文本部分预览）
+    max-range-response-size: 5242880  # 5MB（单次Range返回上限）
+    chunk-size: 268435456             # 256MB
+
+  # 内置查看器配置（跨环境自适应）
+  # 提示：kkFileView v4.0.0+ 必须使用 {base64Url}，v4.0 之前使用 {url}
+  viewer:
+    # kkFileView地址，默认按当前请求的 scheme/host 生成，也可通过环境变量固定为网关地址
+    url-template: "${SECURE_FILE_VIEWER_URL_TEMPLATE:{scheme}://{host}:8012/onlinePreview?url={base64Url}}"
+    # kkFileView 服务端回源地址（文档/Office等转换链路使用）
+    # 常见值：auto / http://host.docker.internal:8080/api / https://api.example.com/api
+    source-base-url: "${SECURE_FILE_VIEWER_SOURCE_BASE_URL:auto}"
+    # 浏览器直接回源地址（视频/音频等链路优先使用）
+    # 默认 auto；如前端与后端域名固定可显式配置
+    browser-source-base-url: "${SECURE_FILE_VIEWER_BROWSER_SOURCE_BASE_URL:auto}"
+    # 浏览器不可直连的主机名列表（逗号分隔），命中后自动回退到当前请求域名
+    browser-unreachable-hosts: "${SECURE_FILE_VIEWER_BROWSER_UNREACHABLE_HOSTS:host.docker.internal,docker.for.mac.host.internal,docker.for.win.host.internal}"
+
+  
+  
+
+  # 系统主密钥（用于加密用户主密钥）
+  # 【安全警告】生产环境必须通过环境变量或外部配置文件注入，不能硬编码
+  # 这里为了课程演示写在配置文件中
+  system-master-key: "ThisIsASystemMasterKeyForEducationPurpose32Bytes"
+
+  # JWT 配置
+  jwt:
+    secret: "SecureFileManagerJwtSecretKeyForCourseDesignProject2024"
+    expiration: 86400000  # 24小时（毫秒）
+    header: Authorization
+    prefix: "Bearer "
+
+  # 找回密码配置
+  reset-code:
+    ttl-minutes: 5
+    resend-seconds: 60
+  reset-mail:
+    from: "忘记密码服务 <2284641493@qq.com>"
+
+  chat:
+    file-share-expire-hours: 24
+    message-page-size: 20
+
+  ai:
+    api-key: "sk-fe877bdf43ae42389efe1e4f1a682d1b"
+    model: "glm-5.1"
+    system-prompt: "你是 SecFileManager 安全文件管理系统的 AI 助手，帮助用户管理文件和解答问题。回复亲切友好，简洁明了。文件搜索结果会由系统自动展示，你只需用一两句话回应即可。"

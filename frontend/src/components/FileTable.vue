@@ -1,0 +1,755 @@
+<template>
+  <el-table
+    ref="tableRef"
+    :data="files"
+    :fit="false"
+    stripe
+    border
+    style="width: 100%"
+    class="custom-table"
+    :header-cell-style="{background:'#fafafa', color:'#606266', fontWeight:'600'}"
+    row-key="id"
+    @selection-change="onSelectionChange"
+  >
+    <el-table-column v-if="enableSelection" type="selection" width="50" />
+    <el-table-column label="文件名" min-width="300" class-name="flex-grow-cell">
+      <template #default="scope">
+        <el-popover
+          trigger="hover"
+          :width="280"
+          placement="right-start"
+          :show-after="500"
+          :hide-after="100"
+          :offset="8"
+          popper-class="file-info-popper"
+        >
+          <template #reference>
+            <div class="file-name-cell">
+              <div class="icon-wrapper" :class="{ 'is-folder': isDir(scope.row) }">
+                <el-icon :size="20">
+                  <component :is="getFileIcon(scope.row)" />
+                </el-icon>
+              </div>
+              
+              <div class="name-wrapper" @click="isDir(scope.row) && $emit('browse', scope.row)">
+                <span
+                  class="file-name"
+                  :class="{ 'clickable': isDir(scope.row) }"
+                >
+                  {{ scope.row.originalFilename }}
+                </span>
+              </div>
+              
+              <el-tag v-if="isDir(scope.row)" size="small" type="info" effect="light" round>文件夹</el-tag>
+            </div>
+          </template>
+
+          <div class="file-info-card">
+            <div class="file-info-header">
+              <div class="file-info-icon" :class="{ 'is-folder': isDir(scope.row) }">
+                <el-icon :size="24">
+                  <component :is="getFileIcon(scope.row)" />
+                </el-icon>
+              </div>
+              <div class="file-info-title">{{ scope.row.originalFilename }}</div>
+            </div>
+            <div class="file-info-divider"></div>
+            <div class="file-info-row">
+              <span class="file-info-label">类型</span>
+              <span class="file-info-value">{{ getFileTypeLabel(scope.row) }}</span>
+            </div>
+            <div class="file-info-row">
+              <span class="file-info-label">大小</span>
+              <span class="file-info-value">{{ formatFileSize(scope.row.fileSize) }}</span>
+            </div>
+            <div class="file-info-row">
+              <span class="file-info-label">修改时间</span>
+              <span class="file-info-value">{{ formatDateTime(scope.row.uploadTime) }}</span>
+            </div>
+            <div v-if="scope.row.description" class="file-info-row">
+              <span class="file-info-label">描述</span>
+              <span class="file-info-value file-info-desc">{{ scope.row.description }}</span>
+            </div>
+          </div>
+        </el-popover>
+      </template>
+    </el-table-column>
+    
+    <el-table-column prop="fileSize" label="大小" width="120" sortable>
+      <template #default="scope">
+        <span class="text-secondary">{{ formatFileSize(scope.row.fileSize) }}</span>
+      </template>
+    </el-table-column>
+    
+    <el-table-column prop="uploadTime" label="修改时间" width="180" sortable>
+      <template #default="scope">
+        <span class="text-secondary">{{ formatDateTime(scope.row.uploadTime) }}</span>
+      </template>
+    </el-table-column>
+
+    <el-table-column v-if="showTypeColumn" label="类型" width="110" align="center">
+      <template #default="scope">
+        <el-tag size="small" effect="plain">{{ getFileTypeLabel(scope.row) }}</el-tag>
+      </template>
+    </el-table-column>
+    
+    <el-table-column prop="description" label="描述" min-width="250" show-overflow-tooltip>
+      <template #default="scope">
+        <span class="text-secondary">{{ scope.row.description || '-' }}</span>
+      </template>
+    </el-table-column>
+    
+    <el-table-column
+      label="操作"
+      width="260"
+      fixed="right"
+      :resizable="false"
+      class-name="action-column-cell"
+      label-class-name="action-column-header"
+    >
+      <template #default="scope">
+        <div class="action-buttons">
+          <template v-if="isVirtualDir(scope.row)">
+            <el-button link type="primary" size="small" @click="$emit('browse', scope.row)">打开</el-button>
+          </template>
+
+          <template v-else-if="isFolderZip(scope.row)">
+            <el-button link type="primary" size="small" @click="$emit('browse', scope.row)">打开</el-button>
+            <el-tooltip content="下载文件夹" placement="top" :enterable="false">
+              <el-button link type="primary" :icon="Download" circle @click="$emit('download', scope.row)" />
+            </el-tooltip>
+            <el-tooltip content="编辑描述" placement="top" :enterable="false">
+              <el-button link type="warning" :icon="Edit" circle @click="$emit('edit-description', scope.row)" />
+            </el-tooltip>
+          </template>
+
+          <template v-else>
+            <el-tooltip content="预览文件" placement="top" :enterable="false">
+              <el-button link type="primary" :icon="View" circle @click="$emit('preview', scope.row)" />
+            </el-tooltip>
+            
+            <el-tooltip content="下载文件" placement="top" :enterable="false">
+              <el-button link type="primary" :icon="Download" circle @click="$emit('download', scope.row)" />
+            </el-tooltip>
+            
+            <el-tooltip content="编辑描述" placement="top" :enterable="false">
+              <el-button link type="warning" :icon="Edit" circle @click="$emit('edit-description', scope.row)" />
+            </el-tooltip>
+          </template>
+          
+          <el-divider direction="vertical" />
+          
+          <el-tooltip content="删除" placement="top" :enterable="false">
+            <el-button link type="danger" :icon="Delete" circle @click="$emit('remove', scope.row)" />
+          </el-tooltip>
+        </div>
+      </template>
+    </el-table-column>
+  </el-table>
+</template>
+
+<script setup>
+import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue';
+import { Folder, Document, Picture, VideoCamera, Headset, DataAnalysis, View, Download, Edit, Delete } from '@element-plus/icons-vue';
+import { getFileTypeCategory, getFileTypeLabel } from '../utils/fileType.js';
+
+const props = defineProps({
+  files: {
+    type: Array,
+    default: () => [],
+  },
+  enableSelection: {
+    type: Boolean,
+    default: false,
+  },
+  showTypeColumn: {
+    type: Boolean,
+    default: true,
+  },
+});
+
+const emit = defineEmits(['selection-change', 'browse', 'download', 'edit-description', 'preview', 'remove']);
+
+const onSelectionChange = (rows) => {
+  emit('selection-change', rows);
+};
+
+const isFolderZip = (row) => row.isFolder === 1;
+const isVirtualDir = (row) => row.isDirectory === true;
+const isDir = (row) => isFolderZip(row) || isVirtualDir(row);
+
+const getFileIcon = (row) => {
+  const category = getFileTypeCategory(row);
+  if (category === 'folder') return Folder;
+  if (category === 'image') return Picture;
+  if (category === 'video') return VideoCamera;
+  if (category === 'audio') return Headset;
+  if (category === 'document') return DataAnalysis;
+  return Document;
+};
+
+const formatFileSize = (bytes) => {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+};
+
+const formatDateTime = (dateTimeStr) => {
+  if (!dateTimeStr) return '-';
+  const date = new Date(dateTimeStr);
+  return date.toLocaleString('zh-CN', { hour12: false });
+};
+
+const tableRef = ref(null);
+const NON_RESIZABLE_COLUMN_LABELS = new Set(['操作']);
+const FALLBACK_MIN_WIDTH = 50;
+const RESIZE_HANDLE_GAP = 10;
+let resizeState = null;
+let rafId = null;
+let headerMouseDownTarget = null;
+
+const getFlattenColumns = () => {
+  const table = tableRef.value;
+  if (!table) return [];
+
+  if (table.layout && typeof table.layout.getFlattenColumns === 'function') {
+    return table.layout.getFlattenColumns();
+  }
+
+  const store = table.store;
+  if (!store || !store.states) return [];
+
+  try {
+    const columnsRef = store.states.columns;
+    const cols = Array.isArray(columnsRef) ? columnsRef : (columnsRef.value || []);
+    const flat = [];
+    const walk = (list) => {
+      list.forEach((col) => {
+        if (col.children && col.children.length) {
+          walk(col.children);
+        } else {
+          flat.push(col);
+        }
+      });
+    };
+    walk(Array.isArray(cols) ? cols : []);
+    return flat;
+  } catch {
+    return [];
+  }
+};
+
+const getLeafHeaderCells = () => {
+  const headerWrapper = tableRef.value?.$el?.querySelector('.el-table__header-wrapper');
+  if (!headerWrapper) return [];
+
+  const rows = Array.from(headerWrapper.querySelectorAll('thead tr'));
+  const leafRow = rows[rows.length - 1];
+  return leafRow ? Array.from(leafRow.children) : [];
+};
+
+const getColumnByHeaderCell = (th) => {
+  if (!th) return null;
+
+  const headerCells = getLeafHeaderCells();
+  const colIndex = headerCells.indexOf(th);
+  if (colIndex < 0) return null;
+
+  const flatColumns = getFlattenColumns();
+  return flatColumns[colIndex] || null;
+};
+
+const measureContentWidth = (cell) => {
+  if (!cell) return 0;
+
+  const previous = {
+    maxWidth: cell.style.maxWidth,
+    overflow: cell.style.overflow,
+    textOverflow: cell.style.textOverflow,
+    webkitLineClamp: cell.style.webkitLineClamp,
+    display: cell.style.display,
+    webkitBoxOrient: cell.style.webkitBoxOrient,
+    whiteSpace: cell.style.whiteSpace,
+  };
+
+  cell.style.maxWidth = 'none';
+  cell.style.overflow = 'visible';
+  cell.style.textOverflow = 'clip';
+  cell.style.webkitLineClamp = 'unset';
+  cell.style.display = 'inline-block';
+  cell.style.webkitBoxOrient = 'initial';
+  cell.style.whiteSpace = 'nowrap';
+
+  const width = Math.ceil(cell.scrollWidth);
+
+  Object.assign(cell.style, previous);
+  return width;
+};
+
+const getColumnMinWidth = (column, th) => {
+  const tableEl = tableRef.value?.$el;
+  if (!tableEl || !column?.id) {
+    return Math.ceil(Number(column?.minWidth || column?.width || FALLBACK_MIN_WIDTH));
+  }
+
+  const widths = [];
+  const headerCell = th?.querySelector('.cell');
+  if (headerCell) {
+    widths.push(measureContentWidth(headerCell) + 24);
+  }
+
+  const colNodes = Array.from(tableEl.querySelectorAll(`col[name="${column.id}"]`));
+  colNodes.forEach((colNode) => {
+    const table = colNode.closest('table');
+    const colIndex = Array.from(colNode.parentElement?.children || []).indexOf(colNode);
+    if (!table || colIndex < 0) return;
+
+    table.querySelectorAll('tbody tr').forEach((row) => {
+      const content = row.children[colIndex]?.querySelector('.cell');
+      if (content) {
+        widths.push(measureContentWidth(content) + 24);
+      }
+    });
+  });
+
+  return Math.max(
+    FALLBACK_MIN_WIDTH,
+    Math.ceil(Number(column.minWidth || 0)),
+    widths.length ? Math.max(...widths) : 0,
+  );
+};
+
+const isColumnResizable = (column) => {
+  if (!column) return false;
+  if (column.type === 'selection') return false;
+  if (NON_RESIZABLE_COLUMN_LABELS.has(column.label)) return false;
+  return true;
+};
+
+const syncColumnWidth = (column, width) => {
+  const el = tableRef.value?.$el;
+  if (!el || !column?.id) return;
+
+  const normalizedWidth = Math.ceil(width);
+  el.querySelectorAll(`col[name="${column.id}"]`).forEach((node) => {
+    node.setAttribute('width', String(normalizedWidth));
+  });
+};
+
+const syncTableContentWidth = () => {
+  const el = tableRef.value?.$el;
+  const table = tableRef.value;
+  if (!el || !table) return;
+
+  const columns = getFlattenColumns();
+  if (!columns.length) return;
+
+  const totalWidth = columns.reduce((sum, column) => {
+    const width = Number(column.realWidth || column.width || column.minWidth || 0);
+    return sum + width;
+  }, 0);
+
+  if (!totalWidth) return;
+
+  el.querySelectorAll('.el-table__header-wrapper table, .el-table__body-wrapper table').forEach((tableNode) => {
+    tableNode.style.width = `${Math.max(el.clientWidth, totalWidth)}px`;
+    tableNode.style.minWidth = '100%';
+  });
+
+  const headerWrapper = el.querySelector('.el-table__header-wrapper');
+  const bodyWrapper = el.querySelector('.el-table__body-wrapper');
+  if (headerWrapper) {
+    headerWrapper.scrollLeft = bodyWrapper?.scrollLeft || 0;
+  }
+};
+
+const onHeaderMouseDown = (e) => {
+  const th = e.target.closest('th');
+  if (!th) return;
+
+  const column = getColumnByHeaderCell(th);
+  if (!isColumnResizable(column)) return;
+
+  const rect = th.getBoundingClientRect();
+  const isNearRightBorder = rect.right - e.clientX <= RESIZE_HANDLE_GAP;
+  if (!isNearRightBorder) return;
+
+  // KEY FIX: Prevent resize cursor and drag on right border if next column is "操作"
+  const headerCells = getLeafHeaderCells();
+  const colIndex = headerCells.indexOf(th);
+  if (colIndex >= 0 && colIndex + 1 < headerCells.length) {
+    const nextColumn = getColumnByHeaderCell(headerCells[colIndex + 1]);
+    if (nextColumn && nextColumn.label === '操作') return;
+  }
+
+  e.stopImmediatePropagation();
+  e.preventDefault();
+
+  resizeState = {
+    column,
+    startWidth: Math.ceil(Number(column.realWidth || column.width || th.offsetWidth || FALLBACK_MIN_WIDTH)),
+    startX: e.clientX,
+    minWidth: getColumnMinWidth(column, th),
+  };
+
+  const el = tableRef.value?.$el;
+  if (el) el.classList.add('is-resizing');
+
+  document.addEventListener('mousemove', onResizeMouseMove);
+  document.addEventListener('mouseup', onResizeMouseUp);
+  document.body.style.cursor = 'col-resize';
+  document.body.style.userSelect = 'none';
+};
+
+const onResizeMouseMove = (e) => {
+  if (!resizeState) return;
+  e.preventDefault();
+
+  if (rafId) cancelAnimationFrame(rafId);
+  
+  // Real-time custom resizing WITHOUT triggering doLayout jitter
+  rafId = requestAnimationFrame(() => {
+    if (!resizeState) return;
+
+    const delta = e.clientX - resizeState.startX;
+    const nextWidth = Math.max(resizeState.minWidth, resizeState.startWidth + delta);
+
+    resizeState.column.width = nextWidth;
+    resizeState.column.realWidth = nextWidth;
+    
+    // Manual sync width instead of tableRef.value.doLayout();
+    syncColumnWidth(resizeState.column, nextWidth);
+    syncTableContentWidth();
+  });
+};
+
+const cleanupResize = () => {
+  resizeState = null;
+  if (rafId) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+
+  const el = tableRef.value?.$el;
+  if (el) el.classList.remove('is-resizing');
+
+  document.removeEventListener('mousemove', onResizeMouseMove);
+  document.removeEventListener('mouseup', onResizeMouseUp);
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+};
+
+const onResizeMouseUp = () => {
+  try {
+    tableRef.value?.doLayout?.();
+    syncTableContentWidth();
+  } catch {}
+  cleanupResize();
+};
+
+const bindHeaderResize = () => {
+  const el = tableRef.value?.$el;
+  if (!el) return;
+
+  const headerWrapper = el.querySelector('.el-table__header-wrapper');
+  if (!headerWrapper || headerMouseDownTarget === headerWrapper) return;
+
+  if (headerMouseDownTarget) {
+    headerMouseDownTarget.removeEventListener('mousedown', onHeaderMouseDown, true);
+  }
+
+  headerWrapper.addEventListener('mousedown', onHeaderMouseDown, true);
+  headerMouseDownTarget = headerWrapper;
+};
+
+// Also add mousemove listener to table header to block cursor changes when hovering over the boundary before "操作"
+const onHeaderHover = (e) => {
+  const th = e.target.closest('th');
+  if (!th) {
+    document.body.style.cursor = '';
+    return;
+  }
+  
+  const rect = th.getBoundingClientRect();
+  const isNearRightBorder = rect.right - e.clientX <= RESIZE_HANDLE_GAP;
+  if (!isNearRightBorder) {
+    return;
+  }
+  
+  const headerCells = getLeafHeaderCells();
+  const colIndex = headerCells.indexOf(th);
+  if (colIndex >= 0 && colIndex + 1 < headerCells.length) {
+    const nextColumn = getColumnByHeaderCell(headerCells[colIndex + 1]);
+    if (nextColumn && nextColumn.label === '操作') {
+      // Force default cursor to override element-plus drag cursor
+      e.stopPropagation();
+      e.target.style.cursor = 'default';
+      document.body.style.cursor = 'default';
+      return;
+    }
+  }
+};
+
+const bindHeaderHover = () => {
+  const el = tableRef.value?.$el;
+  if (!el) return;
+  const headerWrapper = el.querySelector('.el-table__header-wrapper');
+  if (headerWrapper) {
+    headerWrapper.addEventListener('mousemove', onHeaderHover, true);
+    headerWrapper.addEventListener('mouseleave', () => { document.body.style.cursor = ''; }, true);
+  }
+};
+
+onMounted(() => {
+  nextTick(() => {
+    bindHeaderResize();
+    bindHeaderHover();
+    tableRef.value?.doLayout?.();
+    syncTableContentWidth();
+  });
+});
+
+watch(
+  () => [props.files.length, props.enableSelection, props.showTypeColumn],
+  () => {
+    nextTick(() => {
+      tableRef.value?.doLayout?.();
+      syncTableContentWidth();
+    });
+  },
+  { deep: false }
+);
+
+onBeforeUnmount(() => {
+  if (headerMouseDownTarget) {
+    headerMouseDownTarget.removeEventListener('mousedown', onHeaderMouseDown, true);
+    headerMouseDownTarget = null;
+  }
+
+  document.removeEventListener('mousemove', onResizeMouseMove);
+  document.removeEventListener('mouseup', onResizeMouseUp);
+  if (rafId) cancelAnimationFrame(rafId);
+  
+  const el = tableRef.value?.$el;
+  if (el) {
+    const headerWrapper = el.querySelector('.el-table__header-wrapper');
+    if (headerWrapper) {
+       headerWrapper.removeEventListener('mousemove', onHeaderHover, true);
+    }
+  }
+});
+</script>
+
+<style scoped>
+.custom-table {
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  --el-table-border-color: #f0f0f0;
+}
+
+.custom-table :deep(.el-table__body-wrapper),
+.custom-table :deep(.el-table__header-wrapper) {
+  overflow-x: auto;
+}
+
+.custom-table :deep(.el-table__header-wrapper table),
+.custom-table :deep(.el-table__body-wrapper table) {
+  width: 100% !important;
+  min-width: 100%;
+}
+
+/* Hide native element-plus resize proxy completely so our custom JS works cleanly */
+.custom-table :deep(.el-table__column-resize-proxy) {
+  display: none !important;
+}
+
+.custom-table.is-resizing :deep(.el-table__body-wrapper),
+.custom-table.is-resizing :deep(.el-table__header-wrapper) {
+  pointer-events: none;
+}
+
+.custom-table :deep(td),
+.custom-table :deep(th) {
+  border-right-color: #f5f5f5 !important;
+  border-bottom-color: #f0f0f0 !important;
+}
+
+.custom-table :deep(th.is-leaf) {
+  border-right-color: #f5f5f5 !important;
+  border-bottom-color: #ebeef5 !important;
+}
+
+.custom-table :deep(.el-table__border-left-patch),
+.custom-table :deep(.el-table__fixed-right-patch) {
+  border-bottom-color: #f0f0f0 !important;
+}
+
+.custom-table :deep(.el-table__inner-wrapper::before) {
+  background-color: #f0f0f0 !important;
+}
+
+.custom-table :deep(.el-table__header th .el-table__cell) {
+  border-right-color: #f5f5f5 !important;
+}
+
+.custom-table :deep(th.action-column-header .cell),
+.custom-table :deep(td.action-column-cell .cell) {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.custom-table :deep(td.action-column-cell) {
+  overflow: hidden;
+}
+
+.custom-table :deep(.action-column-header) {
+  background: #fafafa;
+}
+
+.file-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.icon-wrapper {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background-color: #f0f9eb;
+  color: #67C23A;
+  flex-shrink: 0;
+}
+
+.icon-wrapper.is-folder {
+  background-color: #ecf5ff;
+  color: #409EFF;
+}
+
+.name-wrapper {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-name {
+  font-weight: 500;
+  color: #303133;
+  font-size: 14px;
+}
+
+.file-name.clickable {
+  cursor: pointer;
+  color: #409EFF;
+  transition: color 0.2s;
+}
+
+.file-name.clickable:hover {
+  text-decoration: underline;
+  color: #66b1ff;
+}
+
+.text-secondary {
+  color: #909399;
+  font-size: 13px;
+}
+
+.action-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  white-space: nowrap;
+}
+</style>
+
+<style>
+.file-info-popper {
+  padding: 0 !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12) !important;
+  overflow: hidden;
+}
+
+.file-info-card {
+  padding: 14px 16px;
+  font-size: 13px;
+  color: #303133;
+  line-height: 1.5;
+}
+
+.file-info-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.file-info-icon {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background-color: #f0f9eb;
+  color: #67C23A;
+  flex-shrink: 0;
+}
+
+.file-info-icon.is-folder {
+  background-color: #ecf5ff;
+  color: #409EFF;
+}
+
+.file-info-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #303133;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.file-info-divider {
+  height: 1px;
+  background-color: #ebeef5;
+  margin: 10px 0;
+}
+
+.file-info-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 3px 0;
+}
+
+.file-info-label {
+  color: #909399;
+  width: 64px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.file-info-value {
+  color: #303133;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.file-info-desc {
+  max-height: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+</style>
