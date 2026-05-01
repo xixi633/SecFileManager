@@ -50,7 +50,7 @@ spring:
       enabled: true
       max-file-size: -1
       max-request-size: -1
-      file-size-threshold: 10MB
+      file-size-threshold: 32MB
 
   # Jackson 配置
   jackson:
@@ -98,6 +98,7 @@ secure-file:
   # 大文件上传阈值（超过该大小启用分块加密）
   upload:
     large-file-threshold: 52428800  # 50MB
+    chunk-size: 16777216            # 16MB
     session-timeout-ms: 900000      # 15分钟上传会话超时
     session-cleanup-interval-ms: 60000 # 1分钟清理一次
 

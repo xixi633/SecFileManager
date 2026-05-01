@@ -6,6 +6,7 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -103,6 +104,43 @@ public class AESUtil {
             
             return new EncryptResult(actualCiphertext, bytesToHex(authTag));
             
+        } catch (Exception e) {
+            log.error("AES加密失败", e);
+            throw new RuntimeException("加密失败", e);
+        }
+    }
+
+    /**
+     * AES-GCM 加密，并将密文直接写入输出流，减少大分片上传时的额外内存拷贝。
+     *
+     * @param plaintext 明文数据
+     * @param keyBase64 AES密钥（Base64编码）
+     * @param ivHex IV（Hex编码）
+     * @param ciphertextOutput 密文输出流
+     * @return GCM 认证标签（Hex编码）
+     */
+    public static String encryptToStream(byte[] plaintext, String keyBase64, String ivHex, OutputStream ciphertextOutput) {
+        try {
+            byte[] keyBytes = Base64.getDecoder().decode(keyBase64);
+            byte[] iv = hexToBytes(ivHex);
+
+            SecretKeySpec secretKey = new SecretKeySpec(keyBytes, ALGORITHM);
+
+            Cipher cipher = Cipher.getInstance(TRANSFORMATION);
+            GCMParameterSpec gcmSpec = new GCMParameterSpec(TAG_LENGTH, iv);
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, gcmSpec);
+
+            byte[] output = new byte[cipher.getOutputSize(plaintext.length)];
+            int actualLength = cipher.doFinal(plaintext, 0, plaintext.length, output, 0);
+            int tagLength = TAG_LENGTH / 8;
+            int ciphertextLength = actualLength - tagLength;
+
+            ciphertextOutput.write(output, 0, ciphertextLength);
+
+            byte[] authTag = new byte[tagLength];
+            System.arraycopy(output, ciphertextLength, authTag, 0, tagLength);
+            return bytesToHex(authTag);
+
         } catch (Exception e) {
             log.error("AES加密失败", e);
             throw new RuntimeException("加密失败", e);
