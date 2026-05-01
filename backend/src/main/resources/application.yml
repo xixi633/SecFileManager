@@ -28,7 +28,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/secure_file_manager?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
     username: root
-    password: 123456
+    password:
 
     # Druid 连接池配置
     druid:
@@ -62,7 +62,7 @@ spring:
     host: smtp.qq.com
     port: 465
     username: 2284641493@qq.com
-    password: afhumznleiyhebid
+    password: 
     properties:
       mail.smtp.auth: true
       mail.smtp.ssl.enable: true
@@ -151,6 +151,6 @@ secure-file:
     message-page-size: 20
 
   ai:
-    api-key: "sk-fe877bdf43ae42389efe1e4f1a682d1b"
+    api-key: ""
     model: "glm-5.1"
     system-prompt: "你是 SecFileManager 安全文件管理系统的 AI 助手，帮助用户管理文件和解答问题。回复亲切友好，简洁明了。文件搜索结果会由系统自动展示，你只需用一两句话回应即可。"
